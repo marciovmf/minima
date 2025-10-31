@@ -1,0 +1,71 @@
+#include <stdx_common.h>
+#define X_IMPL_STRING
+#define X_IMPL_STRBUILDER
+#define X_IMPL_ARENA
+#define X_IMPL_IO
+#define X_IMPL_TIME
+#include <stdx_string.h>
+#include <stdx_strbuilder.h>
+#include <stdx_arena.h>
+#include <stdx_io.h>
+#include <stdx_time.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include "minima.h"
+#include "minima_runtime.h"
+
+int main(int argc, char **argv)
+{
+  if (argc < 2)
+  {
+    fprintf(stderr, "Usage: %s <script.min>\n", argv[0]);
+    return 1;
+  }
+
+  MiParseResult res;
+
+  size_t    src_len  = 0;
+  const char *filename = argv[1];
+  char       *src      = x_io_read_text(filename, &src_len);
+
+  if (!src)
+  {
+    return 1;
+  }
+
+  XArena *arena = x_arena_create(1024 * 16);
+  if (!arena)
+  {
+    fprintf(stderr, "Failed to create arena\n");
+    free(src);
+    return 1;
+  }
+
+  {
+    res = mi_parse_program(src, src_len, arena);
+    if (!res.ok)
+    {
+      x_arena_destroy(arena);
+      free(src);
+      return 1;
+    }
+  }
+
+
+  printf("-------------------- AST -----------------------\n");
+  mi_ast_debug_print_script(res.script);
+  printf("------------------ EXECUTION -------------------\n");
+
+  {
+
+    MiRuntime rt;
+    mi_rt_init(&rt);
+    mi_rt_eval_script(&rt, res.script);
+    mi_rt_shutdown(&rt);
+  }
+
+  x_arena_destroy(arena);
+  free(src);
+  return 0;
+}
