@@ -1,5 +1,5 @@
 #define _CRT_SECURE_NO_WARNINGS
-#include "common.h"
+#include "minima_common.h"
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
