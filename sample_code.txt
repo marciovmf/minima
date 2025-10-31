@@ -1,0 +1,31 @@
+
+This is data!
+
+<?
+str = "Hello\nWorld\t!\nThis is a test:\\ \"quote\"";
+?>
+
+foo
+
+<?
+print(str);
+print("Hello, Sailor!\n");
+x = 10;
+while (x > 0)
+{
+?> Dynamic line #<? print(x, "\n");
+  x = x - 1;
+}
+
+?>
+
+more data
+
+Does it work ?
+
+Hello,
+<? items = [1, 2, 3]; print("Count:", array_size(items)); ?>
+World
+
+
+End!
