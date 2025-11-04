@@ -15,8 +15,6 @@
 typedef enum TokenType_e
 {
   TOKEN_ERROR,              // Represents a tokenizer error
-  //TOKEN_OPEN_CODE_BLOCK,    // <?
-  //TOKEN_CLOSE_CODE_BLOCK,   // ?>
   TOKEN_LOGICAL_AND,        // &&
   TOKEN_LOGICAL_OR,         // ||
   TOKEN_OP_ASSIGN,          // =
@@ -375,26 +373,6 @@ static Token s_lexer_get_next_token_(Lexer *lexer, bool suppress_errors)
       token.type = TOKEN_LITERAL_FLOAT;
     return token;
   }
-  //else if (lexer->current_char == '<' && lexer->next_char == '?')
-  //{
-  //  token.type = TOKEN_OPEN_CODE_BLOCK;
-  //  token.value[0] = lexer->current_char;
-  //  token.value[1] = lexer->next_char;
-  //  token.value[2] = '\0';
-  //  s_lexer_advance(lexer);
-  //  s_lexer_advance(lexer);
-  //  return token;
-  //}
-  //else if (lexer->current_char == '?' && lexer->next_char == '>')
-  //{
-  //  token.type = TOKEN_CLOSE_CODE_BLOCK;
-  //  token.value[0] = lexer->current_char;
-  //  token.value[1] = lexer->next_char;
-  //  token.value[2] = '\0';
-  //  s_lexer_advance(lexer);
-  //  s_lexer_advance(lexer);
-  //  return token;
-  //}
   else if (lexer->current_char == '&' && lexer->next_char == '&')
   {
     token.type = TOKEN_LOGICAL_AND;
@@ -1177,7 +1155,7 @@ static ASTExpression* s_parse_expression(Lexer* lexer)
 
 
 /**
- * A raw expression is anything outside of <? ?> block
+ * A raw expression is anything outside of <% %> block
  */
 ASTStatement* s_parse_raw(Lexer* lexer)
 {
@@ -1189,13 +1167,13 @@ ASTStatement* s_parse_raw(Lexer* lexer)
       s_lexer_advance(lexer);  // Skip whitespace only
     }
 
-    if (lexer->current_char == '<' && lexer->next_char == '?')
+    if (lexer->current_char == '<' && lexer->next_char == '%')
     {
       log_error("Unexpected start delimiter '<?' at %d, %d", lexer->line, lexer->column);
       return NULL;
     }
 
-    if (lexer->current_char == '?' && lexer->next_char == '>')
+    if (lexer->current_char == '%' && lexer->next_char == '>')
     {
       lexer->in_code_block = false;
 
@@ -1225,18 +1203,18 @@ ASTStatement* s_parse_raw(Lexer* lexer)
     {
       if (lexer->in_code_block)
       {
-        log_error("Expecting end delimiter '?>' at %d, %d but reached end of stream.", lexer->line, lexer->column);
+        log_error("Expecting end delimiter '%>' at %d, %d but reached end of stream.", lexer->line, lexer->column);
         return NULL;
       }
       break;
     }
 
     // Handle code end delimiters
-    if (lexer->current_char == '?' && lexer->next_char == '>')
+    if (lexer->current_char == '%' && lexer->next_char == '>')
     {
       if (lexer->in_code_block == false)
       {
-        log_error("Unexpected end delimiter '?>' at %d, %d", lexer->line, lexer->column);
+        log_error("Unexpected end delimiter '%>' at %d, %d", lexer->line, lexer->column);
         return NULL;
       }
 
@@ -1247,7 +1225,7 @@ ASTStatement* s_parse_raw(Lexer* lexer)
     }
 
     // Handle code start delimiter
-    if (lexer->current_char == '<' && lexer->next_char == '?')
+    if (lexer->current_char == '<' && lexer->next_char == '%')
     {
       if (lexer->in_code_block)
       {
@@ -1285,18 +1263,6 @@ static ASTStatement* s_parse_statement(Lexer *lexer)
 
   switch (look_ahead_token1.type)
   {
-    //case TOKEN_OPEN_CODE_BLOCK:
-    //  {
-    //    lexer->raw_mode = false;
-    //    s_lexer_skip_token(lexer, TOKEN_OPEN_CODE_BLOCK);
-    //    return s_parse_raw(lexer);
-    //  }
-    //case TOKEN_CLOSE_CODE_BLOCK:
-    //  {
-    //    lexer->raw_mode = true;
-    //    s_lexer_skip_token(lexer, TOKEN_CLOSE_CODE_BLOCK);
-    //    return s_parse_raw(lexer);
-    //  }
     case TOKEN_OPEN_BRACE:
       {
         if (s_lexer_skip_token(lexer, TOKEN_OPEN_BRACE) == false)
