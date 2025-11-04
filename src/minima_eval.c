@@ -37,6 +37,11 @@ MiValue mi_ast_expression_create_break()
   return (MiValue){ .type = MI_TYPE_INTERNAL_BREAK, .error_code = MI_ERROR_SUCCESS };
 }
 
+MiValue mi_ast_expression_create_continue()
+{
+  return (MiValue){ .type = MI_TYPE_INTERNAL_CONTINUE, .error_code = MI_ERROR_SUCCESS };
+}
+
 MiValue mi_runtime_value_create_array(MiArray* value)
 {
   return (MiValue){ .type = MI_TYPE_ARRAY, .as.array_value = value, .error_code = MI_ERROR_SUCCESS };
@@ -275,7 +280,7 @@ void mi_symbol_table_set_variable_array(MiSymbolTable* table, const char* identi
 
 
 //
-// Evaluation fucntions
+// Evaluation functions
 //
 
 MiValue mi_eval_expression(MiSymbolTable* table, ASTExpression* expr) 
@@ -726,7 +731,7 @@ MiValue mi_eval_statement(MiSymbolTable* table, ASTStatement* stmt)
         while(true)
         {
           // Condition
-          MiValue condition = condition = mi_eval_expression(table, stmt->as.for_stmt.condition);
+          MiValue condition = mi_eval_expression(table, stmt->as.for_stmt.condition);
           ASSERT(condition.type == MI_TYPE_FLOAT || condition.type == MI_TYPE_INT || condition.type == MI_TYPE_BOOL);
 
           if (condition.error_code != MI_ERROR_SUCCESS)
@@ -739,11 +744,19 @@ MiValue mi_eval_statement(MiSymbolTable* table, ASTStatement* stmt)
             break;
 
           MiValue v = mi_eval_statement_list(table, stmt->as.for_stmt.body);
+
           if (v.error_code != MI_ERROR_SUCCESS)
           {
             result.error_code = v.error_code;
             break;
           }
+
+          // MI_TYPE_INTERNAL_CONTINUE needs no special handling here.
+          // mi_eval_statement_list() returns when it sees MI_TYPE_INTERNAL_CONTINUE,
+          // so we just proceeds to the next iteration naturally.
+          // MI_TYPE_INTERNAL_BREAK, on the other hand, should stop the loop entirely.
+          if (v.type == MI_TYPE_INTERNAL_BREAK)
+            break;
 
           // Update
           MiValue update = condition = mi_eval_statement(table, stmt->as.for_stmt.update);
@@ -781,8 +794,13 @@ MiValue mi_eval_statement(MiSymbolTable* table, ASTStatement* stmt)
           if (v.error_code != MI_ERROR_SUCCESS)
             return v;
 
+          // MI_TYPE_INTERNAL_CONTINUE needs no special handling here.
+          // mi_eval_statement_list() returns when it sees MI_TYPE_INTERNAL_CONTINUE,
+          // so we just proceeds to the next iteration naturally.
+          // MI_TYPE_INTERNAL_BREAK, on the other hand, should stop the loop entirely.
           if (v.type == MI_TYPE_INTERNAL_BREAK)
             break;
+
         }
 
         break;
@@ -795,9 +813,12 @@ MiValue mi_eval_statement(MiSymbolTable* table, ASTStatement* stmt)
         //TODO: implement function declarations
         break;
       }
+    case AST_STATEMENT_CONTINUE:
+      {
+        return mi_ast_expression_create_continue();
+      }
     case AST_STATEMENT_BREAK: 
       return mi_ast_expression_create_break();
-      break;
     default:
       break;
   }
@@ -805,17 +826,32 @@ MiValue mi_eval_statement(MiSymbolTable* table, ASTStatement* stmt)
   return mi_runtime_value_create_void();
 }
 
+/**
+ * Evaluates a list of statements
+ *
+ *  This function evaluates statements sequentially until of three things happens:
+ *  1. An error → return immediately (v.error_code != MI_ERROR_SUCCESS).
+ *  2. A control-transfer marker (INTERNAL_BREAK or INTERNAL_CONTINUE) → return immediately.
+ *  3. End of list → return void.
+ *
+ *  BREAK / CONTINUE are *signals*, not actions, at this level. This function does
+ *  not decide loop behavior; the loop evaluator that called us must:
+ *  - On INTERNAL_CONTINUE: resume its loop by advancing its own iteration state.
+ *  - On INTERNAL_BREAK: terminate its loop and discard the marker (or translate it).
+ * 
+ * Rationale: CONTINUE doesn’t need special handling here because short-circuiting
+ * the list already gives the loop evaluator the chance to “naturally continue.”
+ * Likewise, BREAK is surfaced to the caller so it can actually stop the loop.
+ */
 MiValue mi_eval_statement_list(MiSymbolTable* table, ASTStatement* first_stmt)
 {
   ASTStatement* statement = first_stmt;
   while(statement != NULL)
   {
     MiValue v = mi_eval_statement(table, statement);
-
-    if (v.error_code != MI_ERROR_SUCCESS)
-      return v;
-
-    if (v.type == MI_TYPE_INTERNAL_BREAK)
+    if (v.error_code != MI_ERROR_SUCCESS
+        || v.type == MI_TYPE_INTERNAL_BREAK
+        || v.type == MI_TYPE_INTERNAL_CONTINUE)
       return v;
 
     statement = statement->next;

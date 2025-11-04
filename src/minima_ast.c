@@ -95,7 +95,10 @@ void mi_ast_statement_destroy(ASTStatement* statement)
     case AST_STATEMENT_PRINT:
       mi_ast_expression_destroy(statement->as.expression);
       break;
-    case AST_STATEMENT_BREAK: break;
+    case AST_STATEMENT_BREAK:
+    case AST_STATEMENT_CONTINUE:
+    case AST_STATEMENT_RAW:
+      break;
   }
 
   free(statement);
@@ -390,6 +393,14 @@ ASTStatement* mi_ast_statement_create_break(void)
   return stmt;
 }
 
+ASTStatement* mi_ast_statement_create_continue(void)
+{
+  ASTStatement* stmt = MI_ASTCREATE_NODE(ASTStatement);
+  stmt->type = AST_STATEMENT_CONTINUE;
+  stmt->next = NULL;
+  return stmt;
+}
+
 ASTStatement* mi_ast_statement_create_function_call(ASTExpression* func_call_expr)
 {
   ASSERT(func_call_expr != NULL);
@@ -401,7 +412,6 @@ ASTStatement* mi_ast_statement_create_function_call(ASTExpression* func_call_exp
   stmt->next = NULL;
   return stmt;
 }
-
 
 ASTProgram* mi_ast_program_create(ASTStatement* body) 
 {

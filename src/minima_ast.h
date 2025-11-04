@@ -94,7 +94,8 @@ typedef enum ASTStatementType_e
   AST_STATEMENT_BLOCK,           // Block of statements
   AST_STATEMENT_PRINT,           // Print statement
   AST_STATEMENT_FUNCTION_CALL,   // Function call
-  AST_STATEMENT_BREAK            // Break statement
+  AST_STATEMENT_BREAK,           // Break statement
+  AST_STATEMENT_CONTINUE         // Break statement
 } ASTStatementType;
 
 typedef enum ASTExpressionType_e
@@ -296,6 +297,7 @@ ASTStatement* mi_ast_statement_create_function_call(ASTExpression* function_call
 ASTStatement* mi_ast_statement_create_print(ASTExpression* expression);
 ASTStatement* mi_ast_statement_create_input(const char* identifier);
 ASTStatement* mi_ast_statement_create_break(void);
+ASTStatement* mi_ast_statement_create_continue(void);
 void mi_ast_statement_destroy(ASTStatement* statement);
 
 void mi_ast_statement_list_destroy(ASTStatement* stmt_list);

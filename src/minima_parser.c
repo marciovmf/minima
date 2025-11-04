@@ -45,6 +45,7 @@ typedef enum TokenType_e
   TOKEN_WHILE,              // while keyword
   TOKEN_RETURN,             // return keyword
   TOKEN_BREAK,              // break keyword
+  TOKEN_CONTINUE,           // continue keyword
   TOKEN_INCLUDE,            // include keyword
   TOKEN_IDENTIFIER,         // <variable names>
   TOKEN_LITERAL_INT,        // [0-9]+
@@ -73,9 +74,7 @@ typedef struct Lexer_t
   i32     line;           // Current line number
   i32     column;         // Current column number
   u32     in_loop;        // nested loop levels
-
   bool    in_code_block;
-
   bool    looking_ahead;  // set when the lexer is looking ahead instead of actually getting the tokens.
 } Lexer;
 
@@ -226,6 +225,7 @@ static Token s_lexer_get_identifier(Lexer *lexer)
   else if (strcmp(token.value, "include") == 0) token.type = TOKEN_INCLUDE;
   else if (strcmp(token.value, "return") == 0) token.type = TOKEN_RETURN;
   else if (strcmp(token.value, "break") == 0) token.type = TOKEN_BREAK;
+  else if (strcmp(token.value, "continue") == 0) token.type = TOKEN_CONTINUE;
   else if (strcmp(token.value, "while") == 0) token.type = TOKEN_WHILE;
   else if (strcmp(token.value, "true") == 0) token.type = TOKEN_LITERAL_BOOL;
   else if (strcmp(token.value, "false") == 0) token.type = TOKEN_LITERAL_BOOL;
@@ -976,11 +976,12 @@ static ASTStatement* s_parse_while_statement(Lexer* lexer)
  */
 static ASTStatement* s_parse_for_statement(Lexer* lexer)
 {
-  // while ( Condition )
+  // for ( 
   if (s_lexer_skip_token(lexer, TOKEN_FOR) == false
       || s_lexer_skip_token(lexer, TOKEN_OPEN_PAREN) == false)
     return NULL;
 
+  // initialization
   ASTStatement* init = s_parse_assignment_statement(lexer);
   if (s_lexer_skip_token(lexer, TOKEN_SEMICOLON) == false)
   {
@@ -988,6 +989,7 @@ static ASTStatement* s_parse_for_statement(Lexer* lexer)
     return NULL;
   }
 
+  // comparisson
   ASTExpression* condition = s_parse_logical_expression(lexer);
   if (s_lexer_skip_token(lexer, TOKEN_SEMICOLON) == false)
   {
@@ -996,6 +998,7 @@ static ASTStatement* s_parse_for_statement(Lexer* lexer)
     return NULL;
   }
 
+  // increment
   ASTStatement* update = s_parse_assignment_statement(lexer);
   if (s_lexer_skip_token(lexer, TOKEN_CLOSE_PAREN) == false)
   {
@@ -1239,7 +1242,6 @@ ASTStatement* s_parse_raw(Lexer* lexer)
       break;
     }
 
-
     len++;
     s_lexer_advance(lexer);
   }
@@ -1308,6 +1310,20 @@ static ASTStatement* s_parse_statement(Lexer *lexer)
         s_lexer_skip_token(lexer, TOKEN_BREAK);
         if(s_lexer_skip_token(lexer, TOKEN_SEMICOLON))
           return mi_ast_statement_create_break();
+
+        break;
+      }
+    case TOKEN_CONTINUE:
+      {
+        if (lexer->in_loop == 0)
+        {
+          log_error("Sytax error at %d, %d: continue statement not in loop \n", lexer->line, lexer->column);
+          return NULL;
+        }
+
+        s_lexer_skip_token(lexer, TOKEN_CONTINUE);
+        if(s_lexer_skip_token(lexer, TOKEN_SEMICOLON))
+          return mi_ast_statement_create_continue();
 
         break;
       }
