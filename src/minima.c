@@ -37,19 +37,15 @@ static MiValue s_function_print(int param_count, MiValue* args)
 {
   for (int i = 0; i < param_count; i++)
   {
-    char* sep = i == param_count - 1 ? "" : " ";
-
     MiValue* value = &args[i];
     if (value->type == MI_TYPE_ARRAY)
     {
       MiArray* array = value->as.array_value;
       mi_array_print(array);
-      printf("%s", sep);
     }
     else
     {
-      s_print_type(value, sep);
-
+      s_print_type(value, "");
     }
   }
 
