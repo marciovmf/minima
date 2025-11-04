@@ -530,7 +530,7 @@ MiValue mi_eval_expression(MiSymbolTable* table, ASTExpression* expr)
             return mi_runtime_value_create_bool(left.as.number_value <= right.as.number_value);
             break;
           case OP_GTE:
-            return mi_runtime_value_create_bool(left.as.number_value <= right.as.number_value);
+            return mi_runtime_value_create_bool(left.as.number_value >= right.as.number_value);
             break;
           case OP_EQ:
             return mi_runtime_value_create_bool(left.as.number_value == right.as.number_value);
