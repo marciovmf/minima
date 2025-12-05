@@ -486,6 +486,7 @@ static MiRtBuiltinFn s_find_command(MiRuntime *rt, XSlice name)
 static MiRtValue s_cmd_set(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args)
 {
   (void) head_name;
+  (void) argc;
 
   if (!args || !args->expr)
   {
@@ -571,6 +572,7 @@ static MiRtValue s_cmd_print(MiRuntime *rt, const XSlice *head_name, int argc, M
 {
   (void) rt;
   (void) head_name;
+  (void) argc;
 
   MiExprList *it   = args;
   bool        first = true;
@@ -593,6 +595,7 @@ static MiRtValue s_cmd_print(MiRuntime *rt, const XSlice *head_name, int argc, M
 
 static MiRtValue s_cmd_if(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args)
 {
+  (void) argc;
   MiExprList *it = args;
   (void) head_name;
 
@@ -692,6 +695,7 @@ static MiRtValue s_cmd_if(MiRuntime *rt, const XSlice *head_name, int argc, MiEx
 
 static MiRtValue s_cmd_while(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args) 
 {
+  (void) argc;
   MiExprList *cond_node = args;
   MiExprList *body_node = NULL;
   MiRtValue   last      = mi_rt_make_void();
@@ -765,6 +769,8 @@ static MiRtValue s_cmd_while(MiRuntime *rt, const XSlice *head_name, int argc, M
 
 static MiRtValue s_cmd_foreach(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args) 
 {
+
+  (void) head_name;
   if (argc != 3)
   {
     fprintf(stderr, "while: Expected 3 arguments but found %d\n", argc);
@@ -810,6 +816,7 @@ static MiRtValue s_cmd_foreach(MiRuntime *rt, const XSlice *head_name, int argc,
 
 static MiRtValue s_cmd_call(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList   *args)
 {
+  (void) argc;
   (void) head_name;
 
   MiRtValue result = mi_rt_make_void();
@@ -838,6 +845,7 @@ static MiRtValue s_cmd_list(MiRuntime *rt, const XSlice *head_name, int argc, Mi
 {
   (void) rt;
   (void) head_name;
+  (void) argc;
 
   if (!args || !args->expr)
   {
