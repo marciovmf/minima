@@ -1,3 +1,0 @@
-[submodule "src/stdx"]
-	path = src/stdx
-	url = https://github.com/marciovmf/stdx.git
