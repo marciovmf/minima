@@ -1,6 +1,6 @@
 #include "minima_runtime.h"
 #include "minima.h"
-#include "stdx_string.h"
+#include <stdx_string.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,7 +43,6 @@ static void* s_realloc(void *ptr, size_t size)
 //
 // Internal: Expression evaluation 
 //
-
 
 static MiRtValue s_eval_binary_string(MiTokenKind op, const MiRtValue *a, const MiRtValue *b)
 {
@@ -193,26 +192,38 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
         MiRtValue base  = mi_rt_eval_expr(rt, expr->as.index.target);
         MiRtValue index = mi_rt_eval_expr(rt, expr->as.index.index);
 
-        if (base.kind != MI_RT_VAL_LIST || !base.as.list)
-        {
-          fprintf(stderr, "indexing non-list value\n");
-          return mi_rt_make_void();
-        }
-
         if (index.kind != MI_RT_VAL_INT)
         {
           fprintf(stderr, "list index must be integer\n");
           return mi_rt_make_void();
         }
 
-        long long i = index.as.i;
-        if (i < 0 || (size_t) i >= base.as.list->count)
+        if (base.kind == MI_RT_VAL_PAIR)// 
         {
-          fprintf(stderr, "list index out of range\n");
+          long long i = index.as.i;
+          if (i < 0 || i > 1)
+          {
+            fprintf(stderr, "pair index out of range\n");
+            return mi_rt_make_void();
+          }
+          return base.as.pair->items[(size_t) i];
+        }
+        else if (base.kind == MI_RT_VAL_LIST) // || !base.as.list
+        {
+          long long i = index.as.i;
+          if (i < 0 || (size_t) i >= base.as.list->count)
+          {
+            fprintf(stderr, "list index out of range\n");
+            return mi_rt_make_void();
+          }
+          return base.as.list->items[(size_t) i];
+        }
+        else
+        {
+          fprintf(stderr, "indexing non-list or pair value\n");
           return mi_rt_make_void();
         }
 
-        return base.as.list->items[(size_t) i];
       }
 
     case MI_EXPR_UNARY:
@@ -287,6 +298,14 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
           return s_eval_binary_numeric(op, &left, &right);
       }
 
+    case MI_EXPR_PAIR:
+      {
+        MiRtPair *pair = mi_rt_pair_create();
+        pair->items[0] = mi_rt_eval_expr(rt, expr->as.pair.key);
+        pair->items[1] = mi_rt_eval_expr(rt, expr->as.pair.value);
+        return mi_rt_make_pair(pair);
+      }
+
     case MI_EXPR_LIST:
       {
         MiRtList *list = mi_rt_list_create();
@@ -301,7 +320,6 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
       }
 
     case MI_EXPR_DICT:
-    case MI_EXPR_PAIR:
       fprintf(stderr, "dicts and pairs not supported yet\n");
       return mi_rt_make_void();
 
@@ -373,6 +391,7 @@ static MiRtValue mi_rt_eval_command_node(MiRuntime *rt, const MiCommand *cmd)
   return mi_rt_eval_command_expr(rt, &expr);
 }
 
+
 //
 // Variable table
 //
@@ -392,7 +411,7 @@ static ssize_t s_var_find_index(const MiRuntime *rt, XSlice name)
   return -1;
 }
 
-static bool s_var_set(MiRuntime *rt, XSlice name, MiRtValue value)
+bool mi_rt_var_set(MiRuntime *rt, XSlice name, MiRtValue value)
 {
   if (!rt)
   {
@@ -442,6 +461,9 @@ static MiRtValue s_cmd_if(MiRuntime *rt, const XSlice *head_name, int argc, MiEx
 static MiRtValue s_cmd_while(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args);
 static MiRtValue s_cmd_foreach(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args);
 static MiRtValue s_cmd_call(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args);
+static MiRtValue s_cmd_range(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args);
+static MiRtValue s_cmd_typeof(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args);
+
 
 static const MiRtBuiltin s_builtins[] =
 {
@@ -451,7 +473,9 @@ static const MiRtBuiltin s_builtins[] =
   {"if",    s_cmd_if},
   {"while", s_cmd_while },
   {"foreach", s_cmd_foreach },
-  {"call", s_cmd_call }
+  {"call", s_cmd_call },
+  {"range", s_cmd_range },
+  {"typeof", s_cmd_typeof }
 };
 
 static const size_t s_builtin_count =
@@ -511,7 +535,7 @@ static MiRtValue s_cmd_set(MiRuntime *rt, const XSlice *head_name, int argc, MiE
     value = mi_rt_eval_expr(rt, args->next->expr);
   }
 
-  s_var_set(rt, name, value);
+  mi_rt_var_set(rt, name, value);
   return value;
 }
 
@@ -557,6 +581,15 @@ static void s_print_value(FILE *out, const MiRtValue *v)
         fprintf(out, "]");
         break;
       }
+
+    case MI_RT_VAL_PAIR:
+
+      fprintf(out, "(");
+      s_print_value(out, &v->as.pair->items[0]);
+      fprintf(out, ":");
+      s_print_value(out, &v->as.pair->items[1]);
+      fprintf(out, ")");
+      break;
 
     case MI_RT_VAL_BLOCK:
       fprintf(out, "<block>");
@@ -807,7 +840,7 @@ static MiRtValue s_cmd_foreach(MiRuntime *rt, const XSlice *head_name, int argc,
 
     for (unsigned int i = 0; i < iterable.as.list->count; i++)
     {
-      s_var_set(rt, var_name.as.s, iterable.as.list->items[(size_t) i]);
+      mi_rt_var_set(rt, var_name.as.s, iterable.as.list->items[(size_t) i]);
       last = mi_rt_eval_script(rt, body.as.block);
     }
   }
@@ -839,6 +872,78 @@ static MiRtValue s_cmd_call(MiRuntime *rt, const XSlice *head_name, int argc, Mi
   /* Executa o bloco */
   return mi_rt_eval_script(rt, blk.as.block);
 }
+
+static MiRtValue s_cmd_range(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList   *args)
+{
+  (void) head_name;
+
+  if (argc != 2)
+  {
+    fprintf(stderr, "range: Expected 2 arguments but found %d\n", argc);
+    return mi_rt_make_void();
+  }
+
+  MiRtValue start = mi_rt_eval_expr(rt, args->expr);
+  MiRtValue end = mi_rt_eval_expr(rt, args->next->expr);
+
+  if (start.kind != MI_RT_VAL_INT || end.kind != MI_RT_VAL_INT)
+  {
+    fprintf(stderr, "range: start and end must be integers\n");
+  }
+
+  MiRtList* list = mi_rt_list_create();
+  if (start.as.i < end.as.i)
+  {
+    for (long long i = start.as.i; i <= end.as.i; i++)
+    {
+      mi_rt_list_push(list, mi_rt_make_int(i));
+    }
+  }
+  if (start.as.i > end.as.i)
+  {
+    for (long long i = start.as.i; i >= end.as.i; i--)
+    {
+      mi_rt_list_push(list, mi_rt_make_int(i));
+    }
+  }
+
+  return mi_rt_make_list(list);
+}
+
+static MiRtValue s_cmd_typeof(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList   *args)
+{
+  (void) head_name;
+
+  if (argc != 1)
+  {
+    fprintf(stderr, "typeof: Expected 1 arguments but found %d\n", argc);
+    return mi_rt_make_void();
+  }
+
+  MiRtValue value = mi_rt_eval_expr(rt, args->expr);
+  switch (value.kind)
+  {
+    case MI_RT_VAL_INT:
+      return mi_rt_make_string_slice(x_slice("int"));
+    case MI_RT_VAL_FLOAT:
+      return mi_rt_make_string_slice(x_slice("float"));
+    case MI_RT_VAL_BOOL:
+      return mi_rt_make_string_slice(x_slice("bool"));
+    case MI_RT_VAL_STRING:
+      return mi_rt_make_string_slice(x_slice("string"));
+    case MI_RT_VAL_LIST:
+      return mi_rt_make_string_slice(x_slice("list"));
+    case MI_RT_VAL_PAIR:
+      return mi_rt_make_string_slice(x_slice("pair"));
+    case MI_RT_VAL_BLOCK:
+      return mi_rt_make_string_slice(x_slice("block"));
+    case MI_RT_VAL_VOID:
+      return mi_rt_make_string_slice(x_slice("void"));
+  }
+
+  return mi_rt_make_string_slice(x_slice("void"));
+}
+
 
 /* list :: (len list) | (append list value) */
 static MiRtValue s_cmd_list(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args)
@@ -982,15 +1087,9 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
     case MI_EXPR_FLOAT_LITERAL:
     case MI_EXPR_STRING_LITERAL:
     case MI_EXPR_BOOL_LITERAL:
-    case MI_EXPR_VOID_LITERAL:
-      {
-        /* Literais não têm filhos, nada a fazer aqui. */
-      } break;
-
-    case MI_EXPR_VAR:
-      {
-        /* Não há filhos; e VAR nunca é can_fold no parser atual. */
-      } break;
+    case MI_EXPR_VOID_LITERAL: // Literals has no children
+    case MI_EXPR_VAR:          // Var has no children
+      break;
 
     case MI_EXPR_INDEX:
       {
@@ -1324,6 +1423,22 @@ MiRtValue mi_rt_make_string_slice(XSlice s)
   return out;
 }
 
+MiRtValue mi_rt_make_list(MiRtList *list)
+{
+  MiRtValue v;
+  v.kind     = MI_RT_VAL_LIST;
+  v.as.list  = list;
+  return v;
+}
+
+MiRtValue mi_rt_make_pair(MiRtPair *pair)
+{
+  MiRtValue v;
+  v.kind     = MI_RT_VAL_PAIR;
+  v.as.pair  = pair;
+  return v;
+}
+
 MiRtList* mi_rt_list_create(void)
 {
   MiRtList *list = (MiRtList*) s_realloc(NULL, sizeof(MiRtList));
@@ -1333,12 +1448,12 @@ MiRtList* mi_rt_list_create(void)
   return list;
 }
 
-MiRtValue mi_rt_make_list(MiRtList *list)
+MiRtPair* mi_rt_pair_create(void)
 {
-  MiRtValue v;
-  v.kind     = MI_RT_VAL_LIST;
-  v.as.list  = list;
-  return v;
+  MiRtPair *pair = (MiRtPair*) s_realloc(NULL, sizeof(MiRtPair));
+  pair->items[0]  = mi_rt_make_void();
+  pair->items[1]  = mi_rt_make_void();
+  return pair;
 }
 
 bool mi_rt_list_push(MiRtList *list, MiRtValue value)

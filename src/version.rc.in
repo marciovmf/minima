@@ -8,7 +8,7 @@
 #define VER_INTERNALNAME_STR        VER_PRODUCTNAME_STR
 #define VER_COMPANYNAME_STR         "@marciovmf\0"
 #define VER_LEGALCOPYRIGHT_STR      "Copyright (c) 2023 Márcio Freitas\0"
-#define VER_FILEDESCRIPTION_STR     "STATIC site generator - https://github.com/marciovmf/static "
+#define VER_FILEDESCRIPTION_STR     "Minima language - https://github.com/marciovmf/minima "
 
 #ifndef DEBUG
 #define VER_DEBUG                   0

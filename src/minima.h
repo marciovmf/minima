@@ -71,6 +71,12 @@ struct MiExpr;
 struct MiCommand;
 struct MiScript;
 
+typedef struct MiExprPair
+{
+  struct MiExpr   *left;
+  struct MiExpr   *right;
+} MiExprPair;
+
 typedef struct MiExprList
 {
   struct MiExpr   *expr;

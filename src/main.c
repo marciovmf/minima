@@ -1,7 +1,9 @@
 #include <stdx_common.h>
+#define X_IMPL_STRBUILDER
 #define X_IMPL_STRING
 #define X_IMPL_ARENA
 #define X_IMPL_IO
+#include <stdx_strbuilder.h>
 #include <stdx_string.h>
 #include <stdx_arena.h>
 #include <stdx_io.h>

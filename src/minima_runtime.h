@@ -30,8 +30,13 @@ typedef enum MiRtValueKind
   MI_RT_VAL_BOOL,
   MI_RT_VAL_STRING,
   MI_RT_VAL_LIST,
-  MI_RT_VAL_BLOCK
+  MI_RT_VAL_BLOCK,
+  MI_RT_VAL_PAIR
 } MiRtValueKind;
+
+
+typedef struct MiRtPair MiRtPair;
+
 
 struct MiRtValue
 {
@@ -43,10 +48,16 @@ struct MiRtValue
     double           f;
     bool             b;
     XSlice           s;
-    MiRtList *list;
+    MiRtPair        *pair;
+    MiRtList        *list;
     MiScript        *block;
   } as;
 };
+
+typedef struct MiRtPair 
+{
+  MiRtValue items[2];
+} MiRtPair;
 
 struct MiRtList
 {
@@ -82,20 +93,25 @@ struct MiRuntime
 // Public API
 //
 
-void mi_rt_init(MiRuntime *rt);                            // Initializes Minima runtime
-void mi_rt_shutdown(MiRuntime *rt);                        // Terminates Minima runtime and releases resources
-MiRtValue mi_rt_eval_script(MiRuntime *rt, const MiScript *script); // Evaluate a whole script. Returns the value of the last command, or void if there are no commands.
-MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr);       // Evaluates an expression
-bool mi_rt_register_command(MiRuntime *rt, const char *name, MiRtBuiltinFn fn);
-bool mi_rt_var_get(const MiRuntime *rt, XSlice name, MiRtValue *out_value);  // Variable access. Returns false if variable does not exist.  
-MiRtList *mi_rt_list_create(void);                        // Make empy list literal
+void      mi_rt_init(MiRuntime *rt);                      // Initializes Minima runtime
+void      mi_rt_shutdown(MiRuntime *rt);                  // Terminates Minima runtime and releases resources
+MiRtList* mi_rt_list_create(void);                        // Make empy list literal
 bool      mi_rt_list_push(MiRtList *list, MiRtValue v);   // Pushes a value into a list
 MiRtValue mi_rt_make_list(MiRtList *list);                // Make list literal
+MiRtValue mi_rt_make_pair(MiRtPair *pair);                // Make list literal
 MiRtValue mi_rt_make_void(void);                          // make void literal
 MiRtValue mi_rt_make_int(long long v);                    // Make int literal
 MiRtValue mi_rt_make_float(double v);                     // Make float lieteral
 MiRtValue mi_rt_make_bool(bool v);                        // Make boolean literal
 MiRtValue mi_rt_make_string_slice(XSlice s);              // Keeps stlice pointers to the original string.
+bool      mi_rt_var_get(const MiRuntime *rt, XSlice name, MiRtValue *out_value);  // Variable access. Returns false if variable does not exist.  
+bool      mi_rt_var_set(MiRuntime *rt, XSlice name, MiRtValue value);             // Set a runtime variable. 
+bool      mi_rt_register_command(MiRuntime *rt, const char *name, MiRtBuiltinFn fn);
+MiRtValue mi_rt_eval_script(MiRuntime *rt, const MiScript *script); // Evaluate a whole script. Returns the value of the last command, or void if there are no commands.
+MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr);       // Evaluates an expression.
+
+
+MiRtPair* mi_rt_pair_create(void);
 
 void mi_fold_constants(const MiScript *script);
 
