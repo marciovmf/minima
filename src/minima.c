@@ -372,7 +372,7 @@ typedef struct MiParser
   XArena  *arena;
 } MiParser;
 
-static void s_parser_init(MiParser    *p,
+static void s_parser_init(MiParser *p,
     const char  *src,
     size_t       len,
     XArena      *arena)
@@ -683,6 +683,21 @@ static MiExpr* s_parse_expr(MiParser *p)
 }
 
 /**
+ * expr_core ::= unary_expr
+ *
+ * Used for command arguments at the word level: no top-level infix operators.
+ * Still allows:
+ *   - unary '-' / '+' / 'not'
+ *   - indexing: xs[0]
+ *   - command calls as subexpressions: head :: args...
+ * Full expression grammar (with infix) is only available inside (...)
+ */
+static MiExpr* s_parse_expr_core(MiParser *p)
+{
+  return s_parse_unary(p);
+}
+
+/**
  * pair_expr ::= or_expr ( ":" expr )?
  */
 static MiExpr* s_parse_pair(MiParser *p)
@@ -817,13 +832,15 @@ static MiExpr* s_parse_postfix(MiParser *p)
           k != MI_TOK_LBRACKET &&
           k != MI_TOK_LBRACE &&
           k != MI_TOK_MINUS &&
+          k != MI_TOK_PLUS &&
           k != MI_TOK_NOT)
       {
         break;
       }
 
       // Each argument is a complete expression
-      MiExpr *arg = s_parse_expr(p);
+      MiExpr *arg = s_parse_expr_core(p);
+
       if (!arg)
       {
         return NULL;
@@ -1078,7 +1095,7 @@ static MiExpr* s_parse_unary(MiParser *p)
 {
   MiTokenKind kind = s_parser_peek(p).kind;
 
-  if (kind == MI_TOK_MINUS || kind == MI_TOK_NOT)
+  if (kind == MI_TOK_MINUS || kind == MI_TOK_NOT || kind == MI_TOK_PLUS )
   {
     MiToken op_tok = s_parser_advance(p);
     MiExpr *expr   = s_parse_unary(p);

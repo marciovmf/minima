@@ -231,6 +231,19 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
         MiRtValue v = mi_rt_eval_expr(rt, expr->as.unary.expr);
         switch (expr->as.unary.op)
         {
+          case MI_TOK_PLUS:
+            if (v.kind == MI_RT_VAL_INT)
+            {
+              return mi_rt_make_int(+v.as.i);
+            }
+            if (v.kind == MI_RT_VAL_FLOAT)
+            {
+              return mi_rt_make_float(+v.as.f);
+            }
+
+            fprintf(stderr, "unary - expects numeric operand\n");
+            return mi_rt_make_void();
+
           case MI_TOK_MINUS:
             if (v.kind == MI_RT_VAL_INT)
             {
@@ -240,6 +253,7 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
             {
               return mi_rt_make_float(-v.as.f);
             }
+
             fprintf(stderr, "unary - expects numeric operand\n");
             return mi_rt_make_void();
 
@@ -1072,7 +1086,7 @@ static void s_fold_replace_with_literal(MiExpr *expr, MiRtValue v)
   }
 }
 
-/* Recirsive visitor for expressions. */
+/* Recursive visitor for expressions. */
 static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
 {
   if (!expr)
