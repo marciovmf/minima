@@ -3,9 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-//
+//----------------------------------------------------------
 // Lexer
-//
+//----------------------------------------------------------
 
 typedef struct MiLexer
 {
@@ -353,9 +353,9 @@ static MiToken s_lexer_next(MiLexer *lx)
   return s_make_error_token("Unexpected character", line, column);
 }
 
-//
+//----------------------------------------------------------
 // Parser
-//
+//----------------------------------------------------------
 
 typedef struct MiParser
 {
@@ -450,9 +450,9 @@ static bool s_parser_expect(MiParser *p, MiTokenKind kind, const char *msg)
   return true;
 }
 
-//
+//----------------------------------------------------------
 // AST helpers
-//
+//----------------------------------------------------------
 
 static inline MiExpr* s_new_expr(MiParser *p, MiExprKind kind, MiToken tok, bool can_fold)
 {
@@ -547,9 +547,9 @@ static MiScript* s_new_script(MiParser *p)
   return scr;
 }
 
-//
+//----------------------------------------------------------
 // Script and Command parsing
-//
+//----------------------------------------------------------
 
 static void s_parser_sync_newline(MiParser *p)
 {
@@ -664,9 +664,9 @@ static MiCommand* s_parse_command(MiParser *p)
   return cmd;
 }
 
-//
+//----------------------------------------------------------
 // Expression parsing / Precedence
-//
+//----------------------------------------------------------
 
 static bool s_tokens_adjacent(const MiToken *a, const MiToken *b)
 {
@@ -1386,22 +1386,61 @@ static MiExpr* s_parse_primary(MiParser *p)
 
     case MI_TOK_DOLLAR:
       {
+        MiToken dollar_tok = tok;
         s_parser_advance(p); // '$'
-        MiToken name_tok = s_parser_peek(p);
-        if (name_tok.kind != MI_TOK_IDENTIFIER)
-        {
-          s_parser_set_error(p, "Expected identifier after '$'", name_tok);
-          return NULL;
-        }
-        s_parser_advance(p);
 
-        MiExpr *e = s_new_expr(p, MI_EXPR_VAR, name_tok, false);
-        if (!e)
+        MiToken next_tok = s_parser_peek(p);
+
+        // $ident
+        if (next_tok.kind == MI_TOK_IDENTIFIER)
         {
-          return NULL;
+          s_parser_advance(p);
+
+          MiExpr *e = s_new_expr(p, MI_EXPR_VAR, next_tok, false);
+          if (!e)
+          {
+            return NULL;
+          }
+
+          e->as.var.is_indirect = false;
+          e->as.var.name = next_tok.lexeme;
+          e->as.var.name_expr = NULL;
+          return e;
         }
-        e->as.var.name = name_tok.lexeme;
-        return e;
+
+        // $(expr)
+        if (next_tok.kind == MI_TOK_LPAREN)
+        {
+          s_parser_advance(p); // '('
+          MiExpr *name_expr = s_parse_expr(p);
+          if (!name_expr)
+          {
+            return NULL;
+          }
+
+          // Empty lines are allowed right before ')'
+          s_skip_newlines_for_group(p);
+
+          if (!s_parser_expect(p, MI_TOK_RPAREN, "Expected ')' after expression"))
+          {
+            return NULL;
+          }
+
+          MiExpr *e = s_new_expr(p, MI_EXPR_VAR, dollar_tok, false);
+          if (!e)
+          {
+            return NULL;
+          }
+
+          e->as.var.is_indirect = true;
+          e->as.var.name.ptr = NULL;
+          e->as.var.name.length = 0;
+          e->as.var.name_expr = name_expr;
+          return e;
+        }
+
+        s_parser_set_error(p, "Expected identifier or '(' after '$'", next_tok);
+        return NULL;
       }
 
     case MI_TOK_IDENTIFIER:
@@ -1422,16 +1461,11 @@ static MiExpr* s_parse_primary(MiParser *p)
   }
 }
 
-//
+//----------------------------------------------------------
 // Public API
-//
-
+//----------------------------------------------------------
 
 #if defined(_DEBUG) || defined(DEBUG)
-
-//
-// AST Debugging
-//
 
 void mi_ast_debug_print_script_indent(const MiScript *script, int indent);
 
@@ -1490,10 +1524,19 @@ void mi_ast_debug_print_expr(const MiExpr *expr, int indent)
       break;
 
     case MI_EXPR_VAR:
-      s_print_indent(indent);
-      printf("%s VAR(", can_fold);
-      s_print_slice(expr->as.var.name);
-      printf(")\n");
+      if (!expr->as.var.is_indirect)
+      {
+        s_print_indent(indent);
+        printf("%s VAR(", can_fold);
+        s_print_slice(expr->as.var.name);
+        printf(")\n");
+      }
+      else
+      {
+        s_print_indent(indent);
+        printf("%s VAR_INDIRECT:\n", can_fold);
+        mi_ast_debug_print_expr(expr->as.var.name_expr, indent + 1);
+      }
       break;
 
     case MI_EXPR_INDEX:

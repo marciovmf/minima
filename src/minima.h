@@ -8,51 +8,44 @@
 #include <stdx_string.h>  /* XSlice */
 #include <stdx_arena.h>   /* XArena */
 
-//
+//----------------------------------------------------------
 // Tokens
-//
+//----------------------------------------------------------
 
 typedef enum MiTokenKind
 {
   MI_TOK_EOF = 0,
-
   MI_TOK_IDENTIFIER,
   MI_TOK_INT,
   MI_TOK_FLOAT,
   MI_TOK_STRING,
   MI_TOK_TRUE,
   MI_TOK_FALSE,
-
   MI_TOK_AND,
   MI_TOK_OR,
   MI_TOK_NOT,
-
-  MI_TOK_LPAREN,      /* (  */
-  MI_TOK_RPAREN,      /* )  */
-  MI_TOK_LBRACKET,    /* [  */
-  MI_TOK_RBRACKET,    /* ]  */
-  MI_TOK_LBRACE,      /* {  */
-  MI_TOK_RBRACE,      /* }  */
-  MI_TOK_COMMA,       /* ,  */
-  MI_TOK_COLON,       /* :  */
-  MI_TOK_DOLLAR,      /* $  */
-  MI_TOK_NEWLINE,     /* '\n' or ';' at script level */
-
-  MI_TOK_PLUS,        /* +  */
-  MI_TOK_MINUS,       /* -  */
-  MI_TOK_STAR,        /* *  */
-  MI_TOK_SLASH,       /* /  */
-
-  MI_TOK_EQEQ,        /* == */
-  MI_TOK_BANGEQ,      /* != */
-  MI_TOK_LT,          /* <  */
-  MI_TOK_GT,          /* >  */
-  MI_TOK_LTEQ,        /* <= */
-  MI_TOK_GTEQ,        /* >= */
-
-  MI_TOK_DOUBLE_COLON,/* :: */
-
-  MI_TOK_ERROR        /* internal error token */
+  MI_TOK_LPAREN,      // (
+  MI_TOK_RPAREN,      // )
+  MI_TOK_LBRACKET,    // [
+  MI_TOK_RBRACKET,    // ]
+  MI_TOK_LBRACE,      // {
+  MI_TOK_RBRACE,      // }
+  MI_TOK_COMMA,       // ,
+  MI_TOK_COLON,       // :
+  MI_TOK_DOLLAR,      // $
+  MI_TOK_NEWLINE,     // '\n' or ';' at script level
+  MI_TOK_PLUS,        // + 
+  MI_TOK_MINUS,       // - 
+  MI_TOK_STAR,        // * 
+  MI_TOK_SLASH,       // / 
+  MI_TOK_EQEQ,        // ==
+  MI_TOK_BANGEQ,      // !=
+  MI_TOK_LT,          // < 
+  MI_TOK_GT,          // > 
+  MI_TOK_LTEQ,        // <=
+  MI_TOK_GTEQ,        // >=
+  MI_TOK_DOUBLE_COLON,// ::
+  MI_TOK_ERROR        // internal error token
 } MiTokenKind;
 
 typedef struct MiToken
@@ -63,9 +56,9 @@ typedef struct MiToken
   int         column;
 } MiToken;
 
-//
+//----------------------------------------------------------
 // AST
-//
+//----------------------------------------------------------
 
 struct MiExpr;
 struct MiCommand;
@@ -96,21 +89,15 @@ typedef enum MiExprKind
   MI_EXPR_STRING_LITERAL,
   MI_EXPR_BOOL_LITERAL,
   MI_EXPR_VOID_LITERAL,
-
-  MI_EXPR_VAR,          /* $x or $("x") (dynamic not implementado ainda) */
-  MI_EXPR_INDEX,        /* target[index] */
-
+  MI_EXPR_VAR,              // $x or $("x") (dynamic not implementado ainda)
+  MI_EXPR_INDEX,            // target[index]
   MI_EXPR_UNARY,
   MI_EXPR_BINARY,
-
-  MI_EXPR_LIST,         /* [a, b, c] */
-  MI_EXPR_DICT,         /* ["k":v, ...] */
-
-  MI_EXPR_PAIR,         /* "k": v (usado dentro de lista/dict) */
-
-  MI_EXPR_BLOCK,        /* { script } */
-
-  MI_EXPR_COMMAND       /* head_expr :: arg_expr*  (quando usado em expressão) */
+  MI_EXPR_LIST,             // [a, b, c]
+  MI_EXPR_DICT,             // ["k":v, ...]
+  MI_EXPR_PAIR,             // "k": v 
+  MI_EXPR_BLOCK,            // { script }
+MI_EXPR_COMMAND             // head_expr :: arg_expr*  (when used in an expression)
 } MiExprKind;
 
 typedef struct MiExpr
@@ -128,7 +115,9 @@ typedef struct MiExpr
 
     struct
     {
-      XSlice name;   /* nome da variável (sem o $) */
+      bool   is_indirect;
+      XSlice name;              // variable name without $ when is_indirect == false
+      struct MiExpr *name_expr; // expressão (string) quando is_indirect == true
     } var;
 
     struct
@@ -152,12 +141,12 @@ typedef struct MiExpr
 
     struct
     {
-      MiExprList *items;   /* lista encadeada de elementos */
+      MiExprList *items;
     } list;
 
     struct
     {
-      MiExprList *items;   /* todos MI_EXPR_PAIR */
+      MiExprList *items;
     } dict;
 
     struct
@@ -218,9 +207,9 @@ MiParseResult mi_parse_program(const char *source,
     XArena     *arena);
 
 
-//
+//----------------------------------------------------------
 // Debug print helpers
-//
+//----------------------------------------------------------
 
 /* Pretty-print whole script AST to stdout. */
 void mi_ast_debug_print_script(const MiScript *script);

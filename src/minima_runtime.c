@@ -9,19 +9,19 @@
 #ifdef _WIN64
 typedef __int64 ssize_t;
 #else
-typedef long ssize_t;   /* 32-bit Windows: long is 32 bits */
+typedef long ssize_t;   // 32-bit Windows: long is 32 bits
 #endif
 
-//
+//----------------------------------------------------------
 // Forwards
-//
+//----------------------------------------------------------
 
 static MiRtBuiltinFn s_find_command(MiRuntime *rt, XSlice name);
 static MiRtValue mi_rt_eval_command_expr(MiRuntime *rt, const MiExpr *expr);
 
-//
+//----------------------------------------------------------
 // Internal helpers
-//
+//----------------------------------------------------------
 
 static void* s_realloc(void *ptr, size_t size)
 {
@@ -40,9 +40,9 @@ static void* s_realloc(void *ptr, size_t size)
   return p;
 }
 
-//
+//----------------------------------------------------------
 // Internal: Expression evaluation 
-//
+//----------------------------------------------------------
 
 static MiRtValue s_eval_binary_string(MiTokenKind op, const MiRtValue *a, const MiRtValue *b)
 {
@@ -71,7 +71,7 @@ static MiRtValue s_eval_binary_string(MiTokenKind op, const MiRtValue *a, const 
 
 static MiRtValue s_eval_binary_numeric(MiTokenKind op, const MiRtValue *a, const MiRtValue *b)
 {
-  /* Promote to float if needed. */
+  // Promote to float if needed.
   bool is_float = (a->kind == MI_RT_VAL_FLOAT) || (b->kind == MI_RT_VAL_FLOAT);
   if (!is_float &&
       a->kind != MI_RT_VAL_INT &&
@@ -176,12 +176,25 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
 
     case MI_EXPR_VAR:
       {
+        XSlice name = expr->as.var.name;
+
+        if (expr->as.var.is_indirect)
+        {
+          MiRtValue name_v = mi_rt_eval_expr(rt, expr->as.var.name_expr);
+          if (name_v.kind != MI_RT_VAL_STRING)
+          {
+            fprintf(stderr, "dynamic variable name must be string\n");
+            return mi_rt_make_void();
+          }
+          name = name_v.as.s;
+        }
+
         MiRtValue v;
-        if (!mi_rt_var_get(rt, expr->as.var.name, &v))
+        if (!mi_rt_var_get(rt, name, &v))
         {
           fprintf(stderr, "undefined variable: %.*s\n",
-              (int) expr->as.var.name.length,
-              expr->as.var.name.ptr);
+              (int) name.length,
+              name.ptr);
           return mi_rt_make_void();
         }
         return v;
@@ -303,7 +316,7 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
           }
         }
 
-        /* Numeric comparators and arithmetic */
+        // Numeric comparators and arithmetic
         MiRtValue left  = mi_rt_eval_expr(rt, expr->as.binary.left);
         MiRtValue right = mi_rt_eval_expr(rt, expr->as.binary.right);
         if (left.kind == MI_RT_VAL_STRING && right.kind == MI_RT_VAL_STRING)
@@ -393,7 +406,7 @@ static MiRtValue mi_rt_eval_command_node(MiRuntime *rt, const MiCommand *cmd)
     return mi_rt_make_void();
   }
 
-  /* Wrap command node as MI_EXPR_COMMAND and reuse eval. */
+  // Wrap command node as MI_EXPR_COMMAND and reuse eval.
   MiExpr expr;
   memset(&expr, 0, sizeof(expr));
   expr.kind             = MI_EXPR_COMMAND;
@@ -406,9 +419,9 @@ static MiRtValue mi_rt_eval_command_node(MiRuntime *rt, const MiCommand *cmd)
 }
 
 
-//
+//----------------------------------------------------------
 // Variable table
-//
+//----------------------------------------------------------
 
 static ssize_t s_var_find_index(const MiRuntime *rt, XSlice name)
 {
@@ -458,9 +471,9 @@ bool mi_rt_var_set(MiRuntime *rt, XSlice name, MiRtValue value)
 }
 
 
-//
+//----------------------------------------------------------
 // Builtin commands
-//
+//----------------------------------------------------------
 
 typedef struct MiRtBuiltin
 {
@@ -492,14 +505,13 @@ static const MiRtBuiltin s_builtins[] =
   {"typeof", s_cmd_typeof }
 };
 
-static const size_t s_builtin_count =
-sizeof(s_builtins) / sizeof(s_builtins[0]);
+static const size_t s_builtin_count = sizeof(s_builtins) / sizeof(s_builtins[0]);
 
 static MiRtBuiltinFn s_find_command(MiRuntime *rt, XSlice name)
 {
   size_t i;
 
-  /* User-registered commands first. */
+  // User-registered commands first.
   for (i = 0u; i < rt->command_count; ++i)
   {
     if (x_slice_eq(name, rt->commands[i].name))
@@ -508,7 +520,7 @@ static MiRtBuiltinFn s_find_command(MiRuntime *rt, XSlice name)
     }
   }
 
-  /* Then builtins. */
+  // Then builtins.
   for (i = 0u; i < s_builtin_count; ++i)
   {
     if (x_slice_eq_cstr(name, s_builtins[i].name))
@@ -532,7 +544,7 @@ static MiRtValue s_cmd_set(MiRuntime *rt, const XSlice *head_name, int argc, MiE
     return mi_rt_make_void();
   }
 
-  /* First argument: variable name (must evaluate to string). */
+  // First argument: variable name (must evaluate to string).
   MiRtValue name_val = mi_rt_eval_expr(rt, args->expr);
   if (name_val.kind != MI_RT_VAL_STRING)
   {
@@ -543,7 +555,7 @@ static MiRtValue s_cmd_set(MiRuntime *rt, const XSlice *head_name, int argc, MiE
   XSlice name = name_val.as.s;
   MiRtValue value = mi_rt_make_void();
 
-  /* Optional second argument: value expression. */
+  // Optional second argument: value expression.
   if (args->next && args->next->expr)
   {
     value = mi_rt_eval_expr(rt, args->next->expr);
@@ -682,15 +694,15 @@ static MiRtValue s_cmd_if(MiRuntime *rt, const XSlice *head_name, int argc, MiEx
 
     if (cond_val.as.b)
     {
-      /* Execute then-block and stop. */
+      // Execute then-block and stop.
       return mi_rt_eval_script(rt, then_script);
     }
 
-    /* Condition was false, try elseif/else. */
+    // Condition was false, try elseif/else.
     it = it->next;
     if (!it)
     {
-      /* No more clauses. */
+      // No more clauses.
       return mi_rt_make_void();
     }
 
@@ -724,7 +736,7 @@ static MiRtValue s_cmd_if(MiRuntime *rt, const XSlice *head_name, int argc, MiEx
           return mi_rt_make_void();
         }
 
-        /* Next loop iteration will treat this as a new cond. */
+        // Next loop iteration will treat this as a new cond.
         continue;
       }
 
@@ -733,7 +745,7 @@ static MiRtValue s_cmd_if(MiRuntime *rt, const XSlice *head_name, int argc, MiEx
       return mi_rt_make_void();
     }
 
-    /* Not a keyword: stop processing. */
+    // Not a keyword: stop processing.
     return mi_rt_make_void();
   }
 
@@ -773,7 +785,7 @@ static MiRtValue s_cmd_while(MiRuntime *rt, const XSlice *head_name, int argc, M
 
     if (cond_node->expr && cond_node->expr->kind == MI_EXPR_BLOCK)
     {
-      /* while :: { cond-script } { body } */
+      // while :: { cond-script } { body }
       MiScript *cond_script = cond_node->expr->as.block.script;
       for (;;)
       {
@@ -792,7 +804,7 @@ static MiRtValue s_cmd_while(MiRuntime *rt, const XSlice *head_name, int argc, M
     }
     else
     {
-      /* while :: (cond-expr) { body } */
+      // while :: (cond-expr) { body }
       MiExpr *cond_expr = cond_node->expr;
       for (;;)
       {
@@ -874,7 +886,7 @@ static MiRtValue s_cmd_call(MiRuntime *rt, const XSlice *head_name, int argc, Mi
     return result;
   }
 
-  /* Avalia o primeiro argumento */
+  // Avalia o primeiro argumento
   MiRtValue blk = mi_rt_eval_expr(rt, args->expr);
 
   if (blk.kind != MI_RT_VAL_BLOCK || blk.as.block == NULL)
@@ -883,7 +895,6 @@ static MiRtValue s_cmd_call(MiRuntime *rt, const XSlice *head_name, int argc, Mi
     return result;
   }
 
-  /* Executa o bloco */
   return mi_rt_eval_script(rt, blk.as.block);
 }
 
@@ -972,7 +983,7 @@ static MiRtValue s_cmd_list(MiRuntime *rt, const XSlice *head_name, int argc, Mi
     return mi_rt_make_void();
   }
 
-  /* First argument is the subcommand name. */
+  // First argument is the subcommand name.
   MiRtValue sub_val = mi_rt_eval_expr(rt, args->expr);
   if (sub_val.kind != MI_RT_VAL_STRING)
   {
@@ -998,7 +1009,7 @@ static MiRtValue s_cmd_list(MiRuntime *rt, const XSlice *head_name, int argc, Mi
       return mi_rt_make_void();
     }
 
-    /* MiRtList is opaque here, but we assume it has a count field. */
+    // MiRtList is opaque here, but we assume it has a count field.
     long long len = (long long) list_val.as.list->count;
     return mi_rt_make_int(len);
   }
@@ -1032,9 +1043,9 @@ static MiRtValue s_cmd_list(MiRuntime *rt, const XSlice *head_name, int argc, Mi
 }
 
 
-//
+//----------------------------------------------------------
 // Constant folding
-//
+//----------------------------------------------------------
 
 static void s_fold_script(MiRuntime *rt, MiScript *script);
 static void s_fold_command(MiRuntime *rt, MiCommand *cmd);
@@ -1074,14 +1085,11 @@ static void s_fold_replace_with_literal(MiExpr *expr, MiRtValue v)
     case MI_RT_VAL_VOID:
       {
         expr->kind = MI_EXPR_VOID_LITERAL;
-        /* nada extra pra preencher */
       } break;
 
     case MI_RT_VAL_LIST:
     case MI_RT_VAL_BLOCK:
     default:
-      /* Por enquanto não convertemos LIST/BLOCK para AST literal “pré-avalidado”.
-         A AST original já representa essas coisas bem; deixamos como está. */
       break;
   }
 }
@@ -1094,7 +1102,7 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
     return;
   }
 
-  /* Primeiro: fold recursivo nos filhos, independente do can_fold desse nó. */
+  // First: Recursively fold child nodes
   switch (expr->kind)
   {
     case MI_EXPR_INT_LITERAL:
@@ -1102,8 +1110,15 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
     case MI_EXPR_STRING_LITERAL:
     case MI_EXPR_BOOL_LITERAL:
     case MI_EXPR_VOID_LITERAL: // Literals has no children
-    case MI_EXPR_VAR:          // Var has no children
       break;
+
+    case MI_EXPR_VAR:
+      {
+        if (expr->as.var.is_indirect)
+        {
+          s_fold_expr(rt, expr->as.var.name_expr);
+        }
+      } break;
 
     case MI_EXPR_INDEX:
       {
@@ -1137,7 +1152,7 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
         MiExprList *it = expr->as.dict.items;
         while (it)
         {
-          /* Cada item de dict é MI_EXPR_PAIR */
+          // Each item is a MI_EXPR_PAIR
           s_fold_expr(rt, it->expr);
           it = it->next;
         }
@@ -1151,7 +1166,7 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
 
     case MI_EXPR_BLOCK:
       {
-        /* Fold recursivo dentro do bloco (script interno). */
+        // Recursove fold inside block
         if (expr->as.block.script)
         {
           s_fold_script(rt, expr->as.block.script);
@@ -1160,7 +1175,7 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
 
     case MI_EXPR_COMMAND:
       {
-        /* Comando dentro de expressão: fold no head e nos args. */
+        // Command inside expression: fold it.
         s_fold_expr(rt, expr->as.command.head);
 
         MiExprList *it = expr->as.command.args;
@@ -1172,19 +1187,17 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
       } break;
 
     default:
-      {
-        /* Caso de segurança; idealmente não cai aqui. */
-      } break;
+      break;
   }
 
-  /* Segundo: se esse nó é foldable, tentar avaliar e substituir por literal. */
+  // If node is foldable, try evaluate and replace by a literal
 
   if (!expr->can_fold)
   {
     return;
   }
 
-  /* Não faz sentido “foldar” de novo se já é literal simples. */
+  // We do not care about folding literals
   if (expr->kind == MI_EXPR_INT_LITERAL  ||
       expr->kind == MI_EXPR_FLOAT_LITERAL ||
       expr->kind == MI_EXPR_STRING_LITERAL ||
@@ -1194,10 +1207,10 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
     return;
   }
 
-  /* Agora sim: avaliar a expressão em tempo de “compilação”. */
+  // Evaluate expression
   MiRtValue v = mi_rt_eval_expr(rt, expr);
 
-  /* Converte o resultado em literal na própria AST, se for tipo simples. */
+  // Convert result into liteal right in the AST if it is a simple type
   s_fold_replace_with_literal(expr, v);
 }
 
@@ -1253,9 +1266,9 @@ static void s_fold_program(const MiScript *script)
 }
 
 
-//
+//----------------------------------------------------------
 // Public API
-//
+//----------------------------------------------------------
 
 void mi_rt_init(MiRuntime *rt)
 {
@@ -1319,7 +1332,7 @@ bool mi_rt_register_command(MiRuntime *rt, const char *name, MiRtBuiltinFn fn)
 
   len = strlen(name);
 
-  /* Update existing command if found. */
+  // Update existing command if found.
   for (i = 0u; i < rt->command_count; ++i)
   {
     XSlice s = rt->commands[i].name;

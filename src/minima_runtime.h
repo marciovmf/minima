@@ -8,13 +8,14 @@
 #include <stdx_string.h>
 #include "minima.h"
 
-//
+//----------------------------------------------------------
 // Runtime Values / Environment
-//
+//----------------------------------------------------------
 
 typedef struct MiRtValue MiRtValue;
 typedef struct MiRuntime MiRuntime;
 typedef struct MiRtList MiRtList;
+typedef struct MiRtPair MiRtPair;
 
 typedef MiRtValue (*MiRtBuiltinFn) (
     MiRuntime       *rt,
@@ -33,10 +34,6 @@ typedef enum MiRtValueKind
   MI_RT_VAL_BLOCK,
   MI_RT_VAL_PAIR
 } MiRtValueKind;
-
-
-typedef struct MiRtPair MiRtPair;
-
 
 struct MiRtValue
 {
@@ -68,7 +65,7 @@ struct MiRtList
 
 typedef struct MiRtVar
 {
-  XSlice   name;
+  XSlice    name;
   MiRtValue value;
 } MiRtVar;
 
@@ -89,9 +86,9 @@ struct MiRuntime
 };
 
 
-//
+//----------------------------------------------------------
 // Public API
-//
+//----------------------------------------------------------
 
 void      mi_rt_init(MiRuntime *rt);                      // Initializes Minima runtime
 void      mi_rt_shutdown(MiRuntime *rt);                  // Terminates Minima runtime and releases resources
@@ -109,10 +106,7 @@ bool      mi_rt_var_set(MiRuntime *rt, XSlice name, MiRtValue value);           
 bool      mi_rt_register_command(MiRuntime *rt, const char *name, MiRtBuiltinFn fn);
 MiRtValue mi_rt_eval_script(MiRuntime *rt, const MiScript *script); // Evaluate a whole script. Returns the value of the last command, or void if there are no commands.
 MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr);       // Evaluates an expression.
-
-
 MiRtPair* mi_rt_pair_create(void);
-
-void mi_fold_constants(const MiScript *script);
+void      mi_fold_constants(const MiScript *script);
 
 #endif // MINIMA_RUNTIME_H

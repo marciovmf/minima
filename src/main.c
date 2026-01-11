@@ -21,14 +21,11 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  size_t    src_len  = 0;
-  const char *filename = argv[1];
-  char       *src      = x_io_read_text(filename, &src_len);
+  const char* filename = argv[1];
+  size_t src_len = 0;
+  char *src = x_io_read_text(filename, &src_len);
 
-  if (!src)
-  {
-    return 1;
-  }
+  if (!src) { return 1; }
 
   XArena *arena = x_arena_create(1024 * 16);
   if (!arena)
