@@ -1162,7 +1162,7 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
     return;
   }
 
-  /* Primeiro: fold recursivo nos filhos, independente do can_fold desse nó. */
+  // Recursively fold each child node, even if this node can not be folded.
   switch (expr->kind)
   {
     case MI_EXPR_INT_LITERAL:
@@ -1245,28 +1245,28 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
       } break;
   }
 
-  /* Segundo: se esse nó é foldable, tentar avaliar e substituir por literal. */
-
+  // If the current node is foldable, try evaluate it and replace it by a litera.
   if (!expr->can_fold)
   {
     return;
   }
 
-  /* Não faz sentido “foldar” de novo se já é literal simples. */
-  if (expr->kind == MI_EXPR_INT_LITERAL  ||
-      expr->kind == MI_EXPR_FLOAT_LITERAL ||
-      expr->kind == MI_EXPR_STRING_LITERAL ||
-      expr->kind == MI_EXPR_BOOL_LITERAL ||
-      expr->kind == MI_EXPR_VOID_LITERAL)
+  // Literals are alerady the maximum folding level.
+  // And commands should not run during folding.
+  if (expr->kind == MI_EXPR_INT_LITERAL
+      || expr->kind == MI_EXPR_FLOAT_LITERAL
+      || expr->kind == MI_EXPR_STRING_LITERAL
+      || expr->kind == MI_EXPR_BOOL_LITERAL
+      || expr->kind == MI_EXPR_COMMAND
+      || expr->kind == MI_EXPR_VOID_LITERAL)
   {
     return;
   }
 
-  /* Agora sim: avaliar a expressão em tempo de “compilação”. */
-  MiRtValue v = mi_rt_eval_expr(rt, expr);
-
-  /* Converte o resultado em literal na própria AST, se for tipo simples. */
+  MiRtValue v = mi_rt_eval_expr(rt, expr);  // This should be a math/logical expression!
   s_fold_replace_with_literal(expr, v);
+
+  return;
 }
 
 /* Constant fold a command (head + args). */
