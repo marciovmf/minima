@@ -1,6 +1,7 @@
 #include "minima_runtime.h"
 #include "minima.h"
 #include <stdx_string.h>
+#include <stdx_arena.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,7 +10,7 @@
 #ifdef _WIN64
 typedef __int64 ssize_t;
 #else
-typedef long ssize_t;   // 32-bit Windows: long is 32 bits
+typedef long ssize_t;
 #endif
 
 //----------------------------------------------------------
@@ -18,6 +19,9 @@ typedef long ssize_t;   // 32-bit Windows: long is 32 bits
 
 static MiRtBuiltinFn s_find_command(MiRuntime *rt, XSlice name);
 static MiRtValue mi_rt_eval_command_expr(MiRuntime *rt, const MiExpr *expr);
+static MiRtVar* s_rt_var_find_in_frame(const MiScopeFrame* frame, XSlice name);
+static MiRtVar* s_rt_var_find_nearest(MiRuntime* rt, XSlice name, MiScopeFrame** out_owner);
+static MiRtValue s_eval_script_scoped(MiRuntime* rt, const MiScript* script);
 
 //----------------------------------------------------------
 // Internal helpers
@@ -34,14 +38,80 @@ static void* s_realloc(void *ptr, size_t size)
   void *p = realloc(ptr, size);
   if (!p)
   {
-    fprintf(stderr, "minima_runtime: out of memory\n");
+    mi_error("minima_runtime: out of memory\n");
     exit(1);
   }
   return p;
 }
 
+static void s_rt_scope_init(MiScopeFrame* f, size_t chunk_size, MiScopeFrame* parent)
+{
+  f->arena = x_arena_create(chunk_size);
+  if (!f->arena)
+  {
+    mi_error("minima_runtime: out of memory\n");
+    exit(1);
+  }
+  f->vars = NULL;
+  f->parent = parent;
+  f->next_free = NULL;
+}
+
+static MiRtVar* s_rt_var_find_in_frame(const MiScopeFrame* frame, XSlice name)
+{
+  if (!frame)
+  {
+    return NULL;
+  }
+
+  MiRtVar* it = frame->vars;
+  while (it)
+  {
+    if (x_slice_eq(it->name, name))
+    {
+      return it;
+    }
+    it = it->next;
+  }
+
+  return NULL;
+}
+
+static MiRtVar* s_rt_var_find_nearest(MiRuntime* rt, XSlice name, MiScopeFrame** out_owner)
+{
+  if (!rt)
+  {
+    return NULL;
+  }
+
+  MiScopeFrame* f = rt->current;
+  while (f)
+  {
+    MiRtVar* v = s_rt_var_find_in_frame(f, name);
+    if (v)
+    {
+      if (out_owner)
+      {
+        *out_owner = f;
+      }
+      return v;
+    }
+    f = f->parent;
+  }
+
+  return NULL;
+}
+
+static MiRtValue s_eval_script_scoped(MiRuntime* rt, const MiScript* script)
+{
+  mi_rt_scope_push(rt);
+  MiRtValue v = mi_rt_eval_script(rt, script);
+  mi_rt_scope_pop(rt);
+  return v;
+}
+
 //----------------------------------------------------------
-// Internal: Expression evaluation 
+// Expression evaluation 
 //----------------------------------------------------------
 
 static MiRtValue s_eval_binary_string(MiTokenKind op, const MiRtValue *a, const MiRtValue *b)
@@ -63,7 +133,7 @@ static MiRtValue s_eval_binary_string(MiTokenKind op, const MiRtValue *a, const 
     return mi_rt_make_bool(!equals);
   }
   else {
-    fprintf(stderr, "unsupported string binary operator\n");
+    mi_error("unsupported string binary operator\n");
     return mi_rt_make_void();
   }
 
@@ -77,7 +147,7 @@ static MiRtValue s_eval_binary_numeric(MiTokenKind op, const MiRtValue *a, const
       a->kind != MI_RT_VAL_INT &&
       b->kind != MI_RT_VAL_INT)
   {
-    fprintf(stderr, "binary operator: expected numeric operands\n");
+    mi_error("binary operator: expected numeric operands\n");
     return mi_rt_make_void();
   }
 
@@ -121,7 +191,7 @@ static MiRtValue s_eval_binary_numeric(MiTokenKind op, const MiRtValue *a, const
     case MI_TOK_SLASH:
       if (db == 0.0)
       {
-        fprintf(stderr, "division by zero\n");
+        mi_error("division by zero\n");
         return mi_rt_make_void();
       }
       return mi_rt_make_float(da / db);
@@ -145,7 +215,7 @@ static MiRtValue s_eval_binary_numeric(MiTokenKind op, const MiRtValue *a, const
       return mi_rt_make_bool(da >= db);
 
     default:
-      fprintf(stderr, "unsupported numeric binary operator\n");
+      mi_error("unsupported numeric binary operator\n");
       return mi_rt_make_void();
   }
 }
@@ -176,6 +246,7 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
 
     case MI_EXPR_VAR:
       {
+        MiRtValue v;
         XSlice name = expr->as.var.name;
 
         if (expr->as.var.is_indirect)
@@ -183,20 +254,23 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
           MiRtValue name_v = mi_rt_eval_expr(rt, expr->as.var.name_expr);
           if (name_v.kind != MI_RT_VAL_STRING)
           {
-            fprintf(stderr, "dynamic variable name must be string\n");
+            mi_error("indirect variable name must evaluate to string\n");
+            return mi_rt_make_void();
+          }
+          if (name_v.as.s.length == 0)
+          {
+            mi_error("indirect variable name cannot be empty\n");
             return mi_rt_make_void();
           }
           name = name_v.as.s;
         }
 
-        MiRtValue v;
         if (!mi_rt_var_get(rt, name, &v))
         {
-          fprintf(stderr, "undefined variable: %.*s\n",
-              (int) name.length,
-              name.ptr);
+          mi_error_fmt("undefined variable: %.*s\n", (int)name.length, name.ptr);
           return mi_rt_make_void();
         }
+
         return v;
       }
 
@@ -207,7 +281,7 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
 
         if (index.kind != MI_RT_VAL_INT)
         {
-          fprintf(stderr, "list index must be integer\n");
+          mi_error("list index must be integer\n");
           return mi_rt_make_void();
         }
 
@@ -216,7 +290,7 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
           long long i = index.as.i;
           if (i < 0 || i > 1)
           {
-            fprintf(stderr, "pair index out of range\n");
+            mi_error("pair index out of range\n");
             return mi_rt_make_void();
           }
           return base.as.pair->items[(size_t) i];
@@ -226,14 +300,14 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
           long long i = index.as.i;
           if (i < 0 || (size_t) i >= base.as.list->count)
           {
-            fprintf(stderr, "list index out of range\n");
+            mi_error("list index out of range\n");
             return mi_rt_make_void();
           }
           return base.as.list->items[(size_t) i];
         }
         else
         {
-          fprintf(stderr, "indexing non-list or pair value\n");
+          mi_error("indexing non-list or pair value\n");
           return mi_rt_make_void();
         }
 
@@ -254,7 +328,7 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
               return mi_rt_make_float(+v.as.f);
             }
 
-            fprintf(stderr, "unary - expects numeric operand\n");
+            mi_error("unary - expects numeric operand\n");
             return mi_rt_make_void();
 
           case MI_TOK_MINUS:
@@ -267,7 +341,7 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
               return mi_rt_make_float(-v.as.f);
             }
 
-            fprintf(stderr, "unary - expects numeric operand\n");
+            mi_error("unary - expects numeric operand\n");
             return mi_rt_make_void();
 
           case MI_TOK_NOT:
@@ -279,14 +353,14 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
               }
               else
               {
-                fprintf(stderr, "not expects bool operand\n");
+                mi_error("not expects bool operand\n");
                 return mi_rt_make_void();
               }
               return mi_rt_make_bool(!b);
             }
 
           default:
-            fprintf(stderr, "unknown unary operator\n");
+            mi_error("unknown unary operator\n");
             return mi_rt_make_void();
         }
       }
@@ -302,7 +376,7 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
 
           if (left.kind != MI_RT_VAL_BOOL || right.kind != MI_RT_VAL_BOOL)
           {
-            fprintf(stderr, "and/or expect bool operands\n");
+            mi_error("and/or expect bool operands\n");
             return mi_rt_make_void();
           }
 
@@ -335,7 +409,7 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
 
     case MI_EXPR_LIST:
       {
-        MiRtList *list = mi_rt_list_create();
+        MiRtList *list = mi_rt_list_create(rt);
         MiExprList *it = expr->as.list.items;
         while (it)
         {
@@ -347,7 +421,7 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
       }
 
     case MI_EXPR_DICT:
-      fprintf(stderr, "dicts and pairs not supported yet\n");
+      mi_error("dicts and pairs not supported yet\n");
       return mi_rt_make_void();
 
     case MI_EXPR_BLOCK:
@@ -362,7 +436,7 @@ MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr)
       return mi_rt_eval_command_expr(rt, expr);
 
     default:
-      fprintf(stderr, "unknown expression kind\n");
+      mi_error("unknown expression kind\n");
       return mi_rt_make_void();
   }
 }
@@ -382,7 +456,7 @@ static MiRtValue mi_rt_eval_command_expr(MiRuntime *rt, const MiExpr *expr)
   head_val = mi_rt_eval_expr(rt, expr->as.command.head);
   if (head_val.kind != MI_RT_VAL_STRING)
   {
-    fprintf(stderr, "command head is not a string\n");
+    mi_error("command head is not a string\n");
     return mi_rt_make_void();
   }
 
@@ -391,7 +465,7 @@ static MiRtValue mi_rt_eval_command_expr(MiRuntime *rt, const MiExpr *expr)
   fn = s_find_command(rt, head_name);
   if (!fn)
   {
-    fprintf(stderr, "unknown command: %.*s\n",
+    mi_error_fmt("unknown command: %.*s\n",
         (int) head_name.length, head_name.ptr);
     return mi_rt_make_void();
   }
@@ -420,53 +494,35 @@ static MiRtValue mi_rt_eval_command_node(MiRuntime *rt, const MiCommand *cmd)
 
 
 //----------------------------------------------------------
-// Variable table
+// Variable table (scoped)
 //----------------------------------------------------------
-
-static ssize_t s_var_find_index(const MiRuntime *rt, XSlice name)
-{
-  size_t i;
-  for (i = 0u; i < rt->var_count; ++i)
-  {
-    XSlice n = rt->vars[i].name;
-    if (n.length == name.length &&
-        memcmp(n.ptr, name.ptr, n.length) == 0)
-    {
-      return (ssize_t) i;
-    }
-  }
-  return -1;
-}
 
 bool mi_rt_var_set(MiRuntime *rt, XSlice name, MiRtValue value)
 {
-  if (!rt)
+  if (!rt || !rt->current)
   {
     return false;
   }
 
-  ssize_t idx = s_var_find_index(rt, name);
-  if (idx >= 0)
+  MiScopeFrame* owner = NULL;
+  MiRtVar* existing = s_rt_var_find_nearest(rt, name, &owner);
+  if (existing)
   {
-    rt->vars[idx].value = value;
+    existing->value = value;
     return true;
   }
 
-  if (rt->var_count == rt->var_capacity)
+  MiRtVar* v = (MiRtVar*) x_arena_alloc(rt->current->arena, sizeof(MiRtVar));
+  if (!v)
   {
-    size_t new_cap = (rt->var_capacity == 0u) ? 8u : (rt->var_capacity * 2u);
-    MiRtVar *new_vars = (MiRtVar*) s_realloc(
-        rt->vars,
-        new_cap * sizeof(MiRtVar)
-        );
-
-    rt->vars         = new_vars;
-    rt->var_capacity = new_cap;
+    mi_error("minima_runtime: out of memory\n");
+    exit(1);
   }
 
-  rt->vars[rt->var_count].name  = name;
-  rt->vars[rt->var_count].value = value;
-  rt->var_count                 = rt->var_count + 1u;
+  v->name = name;
+  v->value = value;
+  v->next = rt->current->vars;
+  rt->current->vars = v;
   return true;
 }
 
@@ -490,7 +546,6 @@ static MiRtValue s_cmd_foreach(MiRuntime *rt, const XSlice *head_name, int argc,
 static MiRtValue s_cmd_call(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args);
 static MiRtValue s_cmd_range(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args);
 static MiRtValue s_cmd_typeof(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args);
-
 
 static const MiRtBuiltin s_builtins[] =
 {
@@ -540,7 +595,7 @@ static MiRtValue s_cmd_set(MiRuntime *rt, const XSlice *head_name, int argc, MiE
 
   if (!args || !args->expr)
   {
-    fprintf(stderr, "set: missing variable name\n");
+    mi_error("set: missing variable name\n");
     return mi_rt_make_void();
   }
 
@@ -548,7 +603,7 @@ static MiRtValue s_cmd_set(MiRuntime *rt, const XSlice *head_name, int argc, MiE
   MiRtValue name_val = mi_rt_eval_expr(rt, args->expr);
   if (name_val.kind != MI_RT_VAL_STRING)
   {
-    fprintf(stderr, "set: first argument must be a string (variable name)\n");
+    mi_error("set: first argument must be a string (variable name)\n");
     return mi_rt_make_void();
   }
 
@@ -660,7 +715,7 @@ static MiRtValue s_cmd_if(MiRuntime *rt, const XSlice *head_name, int argc, MiEx
 
   if (!it)
   {
-    fprintf(stderr, "if: missing condition and block\n");
+    mi_error("if: missing condition and block\n");
     return mi_rt_make_void();
   }
 
@@ -679,7 +734,7 @@ static MiRtValue s_cmd_if(MiRuntime *rt, const XSlice *head_name, int argc, MiEx
     it = it->next;
     if (!it || !it->expr || it->expr->kind != MI_EXPR_BLOCK)
     {
-      fprintf(stderr, "if: expected block after condition\n");
+      mi_error("if: expected block after condition\n");
       return mi_rt_make_void();
     }
 
@@ -688,21 +743,20 @@ static MiRtValue s_cmd_if(MiRuntime *rt, const XSlice *head_name, int argc, MiEx
     cond_val = mi_rt_eval_expr(rt, cond_expr);
     if (cond_val.kind != MI_RT_VAL_BOOL)
     {
-      fprintf(stderr, "if: condition must be boolean\n");
+      mi_error("if: condition must be boolean\n");
       return mi_rt_make_void();
     }
 
     if (cond_val.as.b)
     {
       // Execute then-block and stop.
-      return mi_rt_eval_script(rt, then_script);
+      return s_eval_script_scoped(rt, then_script);
     }
 
     // Condition was false, try elseif/else.
     it = it->next;
     if (!it)
     {
-      // No more clauses.
       return mi_rt_make_void();
     }
 
@@ -720,11 +774,11 @@ static MiRtValue s_cmd_if(MiRuntime *rt, const XSlice *head_name, int argc, MiEx
         it = it->next;
         if (!it || !it->expr || it->expr->kind != MI_EXPR_BLOCK)
         {
-          fprintf(stderr, "if: expected block after else\n");
+          mi_error("if: expected block after else\n");
           return mi_rt_make_void();
         }
 
-        return mi_rt_eval_script(rt, it->expr->as.block.script);
+        return s_eval_script_scoped(rt, it->expr->as.block.script);
       }
 
       if (x_slice_eq_cstr(kw, "elseif"))
@@ -732,7 +786,7 @@ static MiRtValue s_cmd_if(MiRuntime *rt, const XSlice *head_name, int argc, MiEx
         it = it->next;
         if (!it)
         {
-          fprintf(stderr, "if: missing condition after elseif\n");
+          mi_error("if: missing condition after elseif\n");
           return mi_rt_make_void();
         }
 
@@ -740,7 +794,7 @@ static MiRtValue s_cmd_if(MiRuntime *rt, const XSlice *head_name, int argc, MiEx
         continue;
       }
 
-      fprintf(stderr, "if: unknown keyword '%.*s'\n",
+      mi_error_fmt("if: unknown keyword '%.*s'\n",
           (int) kw.length, kw.ptr);
       return mi_rt_make_void();
     }
@@ -763,20 +817,20 @@ static MiRtValue s_cmd_while(MiRuntime *rt, const XSlice *head_name, int argc, M
 
   if (!cond_node)
   {
-    fprintf(stderr, "while: missing condition and body\n");
+    mi_error("while: missing condition and body\n");
     return mi_rt_make_void();
   }
 
   body_node = cond_node->next;
   if (!body_node)
   {
-    fprintf(stderr, "while: missing body block\n");
+    mi_error("while: missing body block\n");
     return mi_rt_make_void();
   }
 
   if (!body_node->expr || body_node->expr->kind != MI_EXPR_BLOCK)
   {
-    fprintf(stderr, "while: body must be a block\n");
+    mi_error("while: body must be a block\n");
     return mi_rt_make_void();
   }
 
@@ -789,17 +843,17 @@ static MiRtValue s_cmd_while(MiRuntime *rt, const XSlice *head_name, int argc, M
       MiScript *cond_script = cond_node->expr->as.block.script;
       for (;;)
       {
-        MiRtValue cond_val = mi_rt_eval_script(rt, cond_script);
+        MiRtValue cond_val = s_eval_script_scoped(rt, cond_script);
         if (cond_val.kind != MI_RT_VAL_BOOL)
         {
-          fprintf(stderr, "while: condition block must yield bool\n");
+          mi_error("while: condition block must yield bool\n");
           return mi_rt_make_void();
         }
         if (!cond_val.as.b)
         {
           break;
         }
-        last = mi_rt_eval_script(rt, body_script);
+        last = s_eval_script_scoped(rt, body_script);
       }
     }
     else
@@ -811,14 +865,14 @@ static MiRtValue s_cmd_while(MiRuntime *rt, const XSlice *head_name, int argc, M
         MiRtValue cond_val = mi_rt_eval_expr(rt, cond_expr);
         if (cond_val.kind != MI_RT_VAL_BOOL)
         {
-          fprintf(stderr, "while: condition must be boolean\n");
+          mi_error("while: condition must be boolean\n");
           return mi_rt_make_void();
         }
         if (!cond_val.as.b)
         {
           break;
         }
-        last = mi_rt_eval_script(rt, body_script);
+        last = s_eval_script_scoped(rt, body_script);
       }
     }
   }
@@ -832,7 +886,7 @@ static MiRtValue s_cmd_foreach(MiRuntime *rt, const XSlice *head_name, int argc,
   (void) head_name;
   if (argc != 3)
   {
-    fprintf(stderr, "while: Expected 3 arguments but found %d\n", argc);
+    mi_error_fmt("while: Expected 3 arguments but found %d\n", argc);
     return mi_rt_make_void();
   }
 
@@ -844,19 +898,19 @@ static MiRtValue s_cmd_foreach(MiRuntime *rt, const XSlice *head_name, int argc,
 
     if (var_name.kind != MI_RT_VAL_STRING)
     {
-      fprintf(stderr, "while: expected variable name \n");
+      mi_error("while: expected variable name \n");
       return mi_rt_make_void();
     }
 
     if (iterable.kind != MI_RT_VAL_LIST)
     {
-      fprintf(stderr, "while: expected list\n");
+      mi_error("while: expected list\n");
       return mi_rt_make_void();
     }
 
     if (body.kind != MI_RT_VAL_BLOCK)
     {
-      fprintf(stderr, "while: expected code block\n");
+      mi_error("while: expected code block\n");
       return mi_rt_make_void();
     }
   }
@@ -864,11 +918,17 @@ static MiRtValue s_cmd_foreach(MiRuntime *rt, const XSlice *head_name, int argc,
   MiRtValue last = mi_rt_make_void();
   { // Execution
 
+    mi_rt_scope_push(rt);
+
     for (unsigned int i = 0; i < iterable.as.list->count; i++)
     {
+      /* No shadowing: if the iterator exists in a parent scope, this updates it.
+         Otherwise it is created in this foreach scope and will be discarded on pop. */
       mi_rt_var_set(rt, var_name.as.s, iterable.as.list->items[(size_t) i]);
-      last = mi_rt_eval_script(rt, body.as.block);
+      last = s_eval_script_scoped(rt, body.as.block);
     }
+
+    mi_rt_scope_pop(rt);
   }
   return last;
 }
@@ -882,7 +942,7 @@ static MiRtValue s_cmd_call(MiRuntime *rt, const XSlice *head_name, int argc, Mi
 
   if (!args || !args->expr)
   {
-    fprintf(stderr, "call: missing block argument\n");
+    mi_error("call: missing block argument\n");
     return result;
   }
 
@@ -891,11 +951,12 @@ static MiRtValue s_cmd_call(MiRuntime *rt, const XSlice *head_name, int argc, Mi
 
   if (blk.kind != MI_RT_VAL_BLOCK || blk.as.block == NULL)
   {
-    fprintf(stderr, "call: argument is not a block\n");
+    mi_error("call: argument is not a block\n");
     return result;
   }
 
-  return mi_rt_eval_script(rt, blk.as.block);
+  // Executa o bloco
+  return s_eval_script_scoped(rt, blk.as.block);
 }
 
 static MiRtValue s_cmd_range(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList   *args)
@@ -904,7 +965,7 @@ static MiRtValue s_cmd_range(MiRuntime *rt, const XSlice *head_name, int argc, M
 
   if (argc != 2)
   {
-    fprintf(stderr, "range: Expected 2 arguments but found %d\n", argc);
+    mi_error_fmt("range: Expected 2 arguments but found %d\n", argc);
     return mi_rt_make_void();
   }
 
@@ -913,10 +974,10 @@ static MiRtValue s_cmd_range(MiRuntime *rt, const XSlice *head_name, int argc, M
 
   if (start.kind != MI_RT_VAL_INT || end.kind != MI_RT_VAL_INT)
   {
-    fprintf(stderr, "range: start and end must be integers\n");
+    mi_error("range: start and end must be integers\n");
   }
 
-  MiRtList* list = mi_rt_list_create();
+  MiRtList* list = mi_rt_list_create(rt);
   if (start.as.i < end.as.i)
   {
     for (long long i = start.as.i; i <= end.as.i; i++)
@@ -941,7 +1002,7 @@ static MiRtValue s_cmd_typeof(MiRuntime *rt, const XSlice *head_name, int argc, 
 
   if (argc != 1)
   {
-    fprintf(stderr, "typeof: Expected 1 arguments but found %d\n", argc);
+    mi_error_fmt("typeof: Expected 1 arguments but found %d\n", argc);
     return mi_rt_make_void();
   }
 
@@ -969,7 +1030,6 @@ static MiRtValue s_cmd_typeof(MiRuntime *rt, const XSlice *head_name, int argc, 
   return mi_rt_make_string_slice(x_slice("void"));
 }
 
-
 /* list :: (len list) | (append list value) */
 static MiRtValue s_cmd_list(MiRuntime *rt, const XSlice *head_name, int argc, MiExprList *args)
 {
@@ -979,7 +1039,7 @@ static MiRtValue s_cmd_list(MiRuntime *rt, const XSlice *head_name, int argc, Mi
 
   if (!args || !args->expr)
   {
-    fprintf(stderr, "list: expected subcommand 'len' or 'append'\n");
+    mi_error("list: expected subcommand 'len' or 'append'\n");
     return mi_rt_make_void();
   }
 
@@ -987,7 +1047,7 @@ static MiRtValue s_cmd_list(MiRuntime *rt, const XSlice *head_name, int argc, Mi
   MiRtValue sub_val = mi_rt_eval_expr(rt, args->expr);
   if (sub_val.kind != MI_RT_VAL_STRING)
   {
-    fprintf(stderr, "list: expected subcommand 'len' or 'append'\n");
+    mi_error("list: expected subcommand 'len' or 'append'\n");
     return mi_rt_make_void();
   }
 
@@ -998,14 +1058,14 @@ static MiRtValue s_cmd_list(MiRuntime *rt, const XSlice *head_name, int argc, Mi
     MiExprList *list_arg = args->next;
     if (!list_arg || !list_arg->expr)
     {
-      fprintf(stderr, "list len: expected one list argument\n");
+      mi_error("list len: expected one list argument\n");
       return mi_rt_make_void();
     }
 
     MiRtValue list_val = mi_rt_eval_expr(rt, list_arg->expr);
     if (list_val.kind != MI_RT_VAL_LIST || !list_val.as.list)
     {
-      fprintf(stderr, "list len: argument must be a list\n");
+      mi_error("list len: argument must be a list\n");
       return mi_rt_make_void();
     }
 
@@ -1021,7 +1081,7 @@ static MiRtValue s_cmd_list(MiRuntime *rt, const XSlice *head_name, int argc, Mi
 
     if (!list_arg || !list_arg->expr || !value_arg || !value_arg->expr)
     {
-      fprintf(stderr, "list append: expected list and value\n");
+      mi_error("list append: expected list and value\n");
       return mi_rt_make_void();
     }
 
@@ -1030,7 +1090,7 @@ static MiRtValue s_cmd_list(MiRuntime *rt, const XSlice *head_name, int argc, Mi
 
     if (list_val.kind != MI_RT_VAL_LIST || !list_val.as.list)
     {
-      fprintf(stderr, "list append: first arg must be a list\n");
+      mi_error("list append: first arg must be a list\n");
       return mi_rt_make_void();
     }
 
@@ -1038,7 +1098,7 @@ static MiRtValue s_cmd_list(MiRuntime *rt, const XSlice *head_name, int argc, Mi
     return mi_rt_make_void();
   }
 
-  fprintf(stderr, "list: unknown subcommand\n");
+  mi_error("list: unknown subcommand\n");
   return mi_rt_make_void();
 }
 
@@ -1102,7 +1162,7 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
     return;
   }
 
-  // First: Recursively fold child nodes
+  /* Primeiro: fold recursivo nos filhos, independente do can_fold desse nó. */
   switch (expr->kind)
   {
     case MI_EXPR_INT_LITERAL:
@@ -1110,15 +1170,8 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
     case MI_EXPR_STRING_LITERAL:
     case MI_EXPR_BOOL_LITERAL:
     case MI_EXPR_VOID_LITERAL: // Literals has no children
+    case MI_EXPR_VAR:          // Var has no children
       break;
-
-    case MI_EXPR_VAR:
-      {
-        if (expr->as.var.is_indirect)
-        {
-          s_fold_expr(rt, expr->as.var.name_expr);
-        }
-      } break;
 
     case MI_EXPR_INDEX:
       {
@@ -1152,7 +1205,7 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
         MiExprList *it = expr->as.dict.items;
         while (it)
         {
-          // Each item is a MI_EXPR_PAIR
+          /* Cada item de dict é MI_EXPR_PAIR */
           s_fold_expr(rt, it->expr);
           it = it->next;
         }
@@ -1166,7 +1219,7 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
 
     case MI_EXPR_BLOCK:
       {
-        // Recursove fold inside block
+        /* Fold recursivo dentro do bloco (script interno). */
         if (expr->as.block.script)
         {
           s_fold_script(rt, expr->as.block.script);
@@ -1175,7 +1228,7 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
 
     case MI_EXPR_COMMAND:
       {
-        // Command inside expression: fold it.
+        /* Comando dentro de expressão: fold no head e nos args. */
         s_fold_expr(rt, expr->as.command.head);
 
         MiExprList *it = expr->as.command.args;
@@ -1187,17 +1240,19 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
       } break;
 
     default:
-      break;
+      {
+        /* Caso de segurança; idealmente não cai aqui. */
+      } break;
   }
 
-  // If node is foldable, try evaluate and replace by a literal
+  /* Segundo: se esse nó é foldable, tentar avaliar e substituir por literal. */
 
   if (!expr->can_fold)
   {
     return;
   }
 
-  // We do not care about folding literals
+  /* Não faz sentido “foldar” de novo se já é literal simples. */
   if (expr->kind == MI_EXPR_INT_LITERAL  ||
       expr->kind == MI_EXPR_FLOAT_LITERAL ||
       expr->kind == MI_EXPR_STRING_LITERAL ||
@@ -1207,10 +1262,10 @@ static void s_fold_expr(MiRuntime *rt, MiExpr *expr)
     return;
   }
 
-  // Evaluate expression
+  /* Agora sim: avaliar a expressão em tempo de “compilação”. */
   MiRtValue v = mi_rt_eval_expr(rt, expr);
 
-  // Convert result into liteal right in the AST if it is a simple type
+  /* Converte o resultado em literal na própria AST, se for tipo simples. */
   s_fold_replace_with_literal(expr, v);
 }
 
@@ -1277,9 +1332,20 @@ void mi_rt_init(MiRuntime *rt)
     return;
   }
 
-  rt->vars             = NULL;
-  rt->var_count        = 0u;
-  rt->var_capacity     = 0u;
+  rt->scope_chunk_size = 16u * 1024u;
+
+  rt->root.arena = x_arena_create(64u * 1024u);
+  if (!rt->root.arena)
+  {
+    mi_error("minima_runtime: out of memory\n");
+    exit(1);
+  }
+  rt->root.vars = NULL;
+  rt->root.parent = NULL;
+  rt->root.next_free = NULL;
+  rt->current = &rt->root;
+
+  rt->free_frames = NULL;
 
   rt->commands         = NULL;
   rt->command_count    = 0u;
@@ -1295,13 +1361,25 @@ void mi_rt_shutdown(MiRuntime *rt)
     return;
   }
 
-  if (rt->vars)
+  while (rt->current && rt->current != &rt->root)
   {
-    free(rt->vars);
+    mi_rt_scope_pop(rt);
   }
-  rt->vars         = NULL;
-  rt->var_count    = 0u;
-  rt->var_capacity = 0u;
+
+  while (rt->free_frames)
+  {
+    MiScopeFrame* f = rt->free_frames;
+    rt->free_frames = f->next_free;
+
+    x_arena_destroy(f->arena);
+    free(f);
+  }
+
+  x_arena_destroy(rt->root.arena);
+  rt->root.arena = NULL;
+  rt->root.vars = NULL;
+  rt->root.parent = NULL;
+  rt->current = NULL;
 
   if (rt->commands)
   {
@@ -1332,7 +1410,7 @@ bool mi_rt_register_command(MiRuntime *rt, const char *name, MiRtBuiltinFn fn)
 
   len = strlen(name);
 
-  // Update existing command if found.
+  /* Update existing command if found. */
   for (i = 0u; i < rt->command_count; ++i)
   {
     XSlice s = rt->commands[i].name;
@@ -1398,17 +1476,22 @@ bool mi_rt_var_get(const MiRuntime *rt, XSlice name, MiRtValue *out_value)
     return false;
   }
 
-  ssize_t idx = s_var_find_index(rt, name);
-  if (idx < 0)
+  const MiScopeFrame* f = rt->current;
+  while (f)
   {
-    return false;
+    MiRtVar* v = s_rt_var_find_in_frame(f, name);
+    if (v)
+    {
+      if (out_value)
+      {
+        *out_value = v->value;
+      }
+      return true;
+    }
+    f = f->parent;
   }
 
-  if (out_value)
-  {
-    *out_value = rt->vars[idx].value;
-  }
-  return true;
+  return false;
 }
 
 MiRtValue mi_rt_make_void(void)
@@ -1466,11 +1549,23 @@ MiRtValue mi_rt_make_pair(MiRtPair *pair)
   return v;
 }
 
-MiRtList* mi_rt_list_create(void)
+MiRtList* mi_rt_list_create(MiRuntime *rt)
 {
-  MiRtList *list = (MiRtList*) s_realloc(NULL, sizeof(MiRtList));
-  list->items    = NULL;
-  list->count    = 0u;
+  if (!rt || !rt->current || !rt->current->arena)
+  {
+    return NULL;
+  }
+
+  MiRtList* list = (MiRtList*) x_arena_alloc_zero(rt->current->arena, sizeof(MiRtList));
+  if (!list)
+  {
+    mi_error("minima_runtime: out of memory\n");
+    exit(1);
+  }
+
+  list->arena = rt->current->arena;
+  list->items = NULL;
+  list->count = 0u;
   list->capacity = 0u;
   return list;
 }
@@ -1490,14 +1585,28 @@ bool mi_rt_list_push(MiRtList *list, MiRtValue value)
     return false;
   }
 
+  if (!list->arena)
+  {
+    mi_error("minima_runtime: list has no arena\n");
+    return false;
+  }
+
   if (list->count == list->capacity)
   {
     size_t new_cap = (list->capacity == 0u) ? 4u : (list->capacity * 2u);
-    MiRtValue *new_items = (MiRtValue*) s_realloc(
-        list->items,
-        new_cap * sizeof(MiRtValue)
-        );
-    list->items    = new_items;
+    MiRtValue* new_items = (MiRtValue*) x_arena_alloc(list->arena, new_cap * sizeof(MiRtValue));
+    if (!new_items)
+    {
+      mi_error("minima_runtime: out of memory\n");
+      exit(1);
+    }
+
+    if (list->items && list->count > 0u)
+    {
+      memcpy(new_items, list->items, list->count * sizeof(MiRtValue));
+    }
+
+    list->items = new_items;
     list->capacity = new_cap;
   }
 
@@ -1506,3 +1615,57 @@ bool mi_rt_list_push(MiRtList *list, MiRtValue value)
   return true;
 }
 
+void mi_rt_scope_push(MiRuntime* rt)
+{
+  if (!rt)
+  {
+    return;
+  }
+
+  MiScopeFrame* f = NULL;
+  if (rt->free_frames)
+  {
+    f = rt->free_frames;
+    rt->free_frames = f->next_free;
+    f->next_free = NULL;
+
+    x_arena_reset_keep_head(f->arena);
+    f->vars = NULL;
+    f->parent = rt->current;
+  }
+  else
+  {
+    f = (MiScopeFrame*) malloc(sizeof(MiScopeFrame));
+    if (!f)
+    {
+      mi_error("minima_runtime: out of memory\n");
+      exit(1);
+    }
+
+    s_rt_scope_init(f, rt->scope_chunk_size, rt->current);
+  }
+
+  rt->current = f;
+}
+
+void mi_rt_scope_pop(MiRuntime* rt)
+{
+  if (!rt || !rt->current)
+  {
+    return;
+  }
+
+  if (rt->current == &rt->root)
+  {
+    return;
+  }
+
+  MiScopeFrame* f = rt->current;
+  rt->current = f->parent;
+
+  x_arena_reset_keep_head(f->arena);
+  f->vars = NULL;
+  f->parent = NULL;
+  f->next_free = rt->free_frames;
+  rt->free_frames = f;
+}

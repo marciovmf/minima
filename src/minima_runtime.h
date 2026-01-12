@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdx_string.h>
+#include <stdx_arena.h>
 #include "minima.h"
 
 //----------------------------------------------------------
@@ -15,6 +16,7 @@
 typedef struct MiRtValue MiRtValue;
 typedef struct MiRuntime MiRuntime;
 typedef struct MiRtList MiRtList;
+typedef struct MiScopeFrame MiScopeFrame;
 typedef struct MiRtPair MiRtPair;
 
 typedef MiRtValue (*MiRtBuiltinFn) (
@@ -51,13 +53,14 @@ struct MiRtValue
   } as;
 };
 
-typedef struct MiRtPair 
+struct MiRtPair
 {
   MiRtValue items[2];
-} MiRtPair;
+};
 
 struct MiRtList
 {
+  XArena*    arena;
   MiRtValue *items;
   size_t     count;
   size_t     capacity;
@@ -65,9 +68,18 @@ struct MiRtList
 
 typedef struct MiRtVar
 {
-  XSlice    name;
+  XSlice   name;
   MiRtValue value;
+  struct MiRtVar* next;
 } MiRtVar;
+
+struct MiScopeFrame
+{
+  XArena*        arena;
+  MiRtVar*       vars;
+  MiScopeFrame*  parent;
+  MiScopeFrame*  next_free;
+};
 
 typedef struct MiRtUserCommand
 {
@@ -77,9 +89,10 @@ typedef struct MiRtUserCommand
 
 struct MiRuntime
 {
-  MiRtVar *vars;
-  size_t   var_count;
-  size_t   var_capacity;
+  MiScopeFrame  root;
+  MiScopeFrame* current;
+  MiScopeFrame* free_frames;
+  size_t scope_chunk_size;
   MiRtUserCommand *commands;    // Command table
   size_t   command_count;
   size_t   command_capacity;
@@ -92,7 +105,8 @@ struct MiRuntime
 
 void      mi_rt_init(MiRuntime *rt);                      // Initializes Minima runtime
 void      mi_rt_shutdown(MiRuntime *rt);                  // Terminates Minima runtime and releases resources
-MiRtList* mi_rt_list_create(void);                        // Make empy list literal
+MiRtList* mi_rt_list_create(MiRuntime *rt);               // Make empy list literal
+MiRtPair* mi_rt_pair_create(void);
 bool      mi_rt_list_push(MiRtList *list, MiRtValue v);   // Pushes a value into a list
 MiRtValue mi_rt_make_list(MiRtList *list);                // Make list literal
 MiRtValue mi_rt_make_pair(MiRtPair *pair);                // Make list literal
@@ -106,7 +120,8 @@ bool      mi_rt_var_set(MiRuntime *rt, XSlice name, MiRtValue value);           
 bool      mi_rt_register_command(MiRuntime *rt, const char *name, MiRtBuiltinFn fn);
 MiRtValue mi_rt_eval_script(MiRuntime *rt, const MiScript *script); // Evaluate a whole script. Returns the value of the last command, or void if there are no commands.
 MiRtValue mi_rt_eval_expr(MiRuntime *rt, const MiExpr *expr);       // Evaluates an expression.
-MiRtPair* mi_rt_pair_create(void);
+void      mi_rt_scope_push(MiRuntime* rt);                // Creates a new nested scope
+void      mi_rt_scope_pop(MiRuntime* rt);                 // Destroys current scope and returns to previous one.
 void      mi_fold_constants(const MiScript *script);
 
 #endif // MINIMA_RUNTIME_H

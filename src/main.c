@@ -3,21 +3,22 @@
 #define X_IMPL_STRING
 #define X_IMPL_ARENA
 #define X_IMPL_IO
+#define X_IMPL_LOG
 #include <stdx_strbuilder.h>
 #include <stdx_string.h>
 #include <stdx_arena.h>
 #include <stdx_io.h>
+#include <stdx_log.h>
 
-#include "minima_runtime.h"
-#include <stdio.h>
-#include <stdlib.h>
 #include "minima.h"
+#include "minima_runtime.h"
+
 
 int main(int argc, char **argv)
 {
   if (argc < 2)
   {
-    fprintf(stderr, "Usage: %s <script.min>\n", argv[0]);
+    mi_error_fmt("Usage: %s <script.min>\n", argv[0]);
     return 1;
   }
 
@@ -30,7 +31,7 @@ int main(int argc, char **argv)
   XArena *arena = x_arena_create(1024 * 16);
   if (!arena)
   {
-    fprintf(stderr, "Failed to create arena\n");
+    mi_error("Failed to create arena\n");
     free(src);
     return 1;
   }
