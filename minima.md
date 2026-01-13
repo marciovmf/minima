@@ -116,7 +116,206 @@ Literals like '5' or lists like '[1,2,3]' at the start of a command line produce
 If 'rand' does not accept args, 'rand :: + 1' results in a runtime error.
 12.3 Type mismatch:
 Static/Runtime error if fixed type variables are reassigned different types.   
-# 13. FAQ   
+
+# 13. Grammar
+
+```
+<program> ::= <script> <EOF>
+
+<script> ::= <opt_newlines> <command_seq>
+
+<command_seq> ::= <command_line> <command_seq>
+              |  ε
+
+<command_line> ::= <command> <opt_newlines>
+
+<opt_newlines> ::= <NEWLINE> <opt_newlines>
+                |  ε
+
+
+<command> ::= <command_expr>
+
+
+/* -----------------------------
+   Expressions (full precedence)
+   ----------------------------- */
+
+<expr> ::= <pair_expr>
+
+<pair_expr> ::= <or_expr> <pair_tail>
+
+<pair_tail> ::= ":" <expr>
+             |  ε
+
+<or_expr> ::= <and_expr> <or_tail>
+
+<or_tail> ::= "or" <and_expr> <or_tail>
+           |  ε
+
+<and_expr> ::= <equality_expr> <and_tail>
+
+<and_tail> ::= "and" <equality_expr> <and_tail>
+            |  ε
+
+<equality_expr> ::= <comparison_expr> <equality_tail>
+
+<equality_tail> ::= "==" <comparison_expr> <equality_tail>
+                 |  "!=" <comparison_expr> <equality_tail>
+                 |  ε
+
+<comparison_expr> ::= <additive_expr> <comparison_tail>
+
+<comparison_tail> ::= "<"  <additive_expr> <comparison_tail>
+                   |  "<=" <additive_expr> <comparison_tail>
+                   |  ">"  <additive_expr> <comparison_tail>
+                   |  ">=" <additive_expr> <comparison_tail>
+                   |  ε
+
+<additive_expr> ::= <multiplicative_expr> <additive_tail>
+
+<additive_tail> ::= "+" <multiplicative_expr> <additive_tail>
+                 |  "-" <multiplicative_expr> <additive_tail>
+                 |  ε
+
+<multiplicative_expr> ::= <unary_expr> <multiplicative_tail>
+
+<multiplicative_tail> ::= "*" <unary_expr> <multiplicative_tail>
+                       |  "/" <unary_expr> <multiplicative_tail>
+                       |  "%" <unary_expr> <multiplicative_tail>
+                       |  ε
+
+<unary_expr> ::= "-"   <unary_expr>
+              |  "+"   <unary_expr>
+              |  "not" <unary_expr>
+              |  <postfix_expr>
+
+
+/* -----------------------------------------
+   Postfix (indexing + command call postfix)
+   ----------------------------------------- */
+
+<postfix_expr> ::= <primary_expr> <index_chain> <command_call_opt>
+
+<index_chain> ::= <indexing> <index_chain>
+               |  ε
+
+<indexing> ::= "[" <group_newlines> <expr> <group_newlines> "]"
+
+<command_call_opt> ::= "::" <arg_seq>
+                    |  ε
+
+<arg_seq> ::= <arg_expr> <arg_seq>
+           |  ε
+
+
+/* -------------------------------------------------------
+   Arg expressions (word-level):
+   In code: args are parsed with s_parse_expr_core(), which
+   disallows top-level infix ops, but you can still use full
+   <expr> by parenthesizing:  foo :: (1 + 2)
+   ------------------------------------------------------- */
+
+<arg_expr> ::= <unary_expr>
+/* SEMANTIC RULE:
+   When parsing command arguments after '::', the parser stops
+   at NEWLINE / EOF / ')' / '}' / ']' and also refuses to start
+   an arg unless the next token begins an expression.
+   Also: top-level infix is effectively gated behind '(' ... ')'.
+*/
+
+
+/* -----------------------------
+   Primary expressions / literals
+   ----------------------------- */
+
+<primary_expr> ::= <int_lit>
+                |  <float_lit>
+                |  <string_lit>
+                |  <bool_lit>
+                |  <bareword_string>
+                |  <var_expr>
+                |  <group_expr>
+                |  <list_or_dict_lit>
+                |  <block_lit>
+
+<bool_lit> ::= "true"
+            |  "false"
+
+<bareword_string> ::= <IDENT>
+/* NOTE: in minima.c, IDENT used as an expression becomes a string literal node. */
+
+<var_expr> ::= "$" <IDENT>
+            |  "$" "(" <expr> <group_newlines> ")"
+
+<group_expr> ::= "(" <group_newlines> <group_contents> ")"
+
+<group_contents> ::= <expr> <group_newlines>
+                  |  ε
+/* NOTE: "()" is a void literal. */
+
+<list_or_dict_lit> ::= "[" <group_newlines> <list_items> "]"
+
+<list_items> ::= <elements_opt> <group_newlines>
+
+<elements_opt> ::= <elements>
+                |  ε
+
+<elements> ::= <expr> <elements_tail> <trailing_comma_opt>
+
+<elements_tail> ::= "," <group_newlines> <expr> <elements_tail>
+                 |  ε
+
+<trailing_comma_opt> ::= ","
+                      |  ε
+
+/* SEMANTIC RULE:
+   The parser returns a DICT node only if every element parsed in [...]
+   is a pair (i.e., each element has the form <expr> ":" <expr>).
+   Otherwise it returns a LIST node (and pairs may still appear as elements).
+*/
+
+<block_lit> ::= "{" <script> "}"
+
+
+/* -----------------------------
+   Newline handling inside groups
+   ----------------------------- */
+
+<group_newlines> ::= <NEWLINE> <group_newlines>
+                  |  ε
+/* NOTE: implementation allows NEWLINE immediately after '(' / '[' / '{' / ',' and before closing tokens. */
+
+
+/* -----------------------------
+   Lexical terminals (tokens)
+   ----------------------------- */
+
+<int_lit> ::= <INT>
+<float_lit> ::= <FLOAT>
+<string_lit> ::= <STRING>
+
+<IDENT> ::= token(MI_TOK_IDENTIFIER)
+<INT>   ::= token(MI_TOK_INT)
+<FLOAT> ::= token(MI_TOK_FLOAT)
+<STRING>::= token(MI_TOK_STRING)
+
+<NEWLINE> ::= token(MI_TOK_NEWLINE)
+<EOF>     ::= token(MI_TOK_EOF)
+
+
+/* -----------------------------
+   Command expression
+   ----------------------------- */
+
+<command_expr> ::= <postfix_expr_head> "::" <arg_seq>
+
+<postfix_expr_head> ::= <postfix_expr>
+/* NOTE: In practice, the head can be something complex if you wrap it in (...),
+   because '(' <expr> ')' produces an expression that can then take the '::' postfix. */
+
+```
+
+# 14. FAQ   
 Q1: Why is (rand + 1) arithmetic?
 Because it lacks '::'. The separator is the explicit trigger for command arguments.   
 Q2: How do I call a command with no arguments?
