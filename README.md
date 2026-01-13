@@ -4,6 +4,8 @@ Minima is a small, embeddable scripting language that aims for **high expressive
 
 Minima is designed to be embedded anywhere you need the power of a scripting language but cannot afford the weight of Lua or the complexity of larger interpreters. It aims to be expressive in the spirit of Tcl or Lisp—composable, flexible, and pleasant to write—while stripping away the historical quirks, ambiguous rules, and conceptual overhead that often accompany them. The goal is simple: keep what is good, fix what is bad, and provide a predictable, lightweight language that feels sane to use and cheap to run.
 
+---
+
 At the top level, Minima is **command-based**:
 
 ```text
@@ -102,8 +104,6 @@ set :: strict "ok"                   ; must always be string
 
 ---
 
-For the full, precise language definition (syntax, evaluation rules, and edge cases), see:
+For the full, precise language definition (syntax, evaluation rules, and edge cases), [Minima spec document](minima.md)
 
-```text
-minima_spec_v1.16.md
-```
+
