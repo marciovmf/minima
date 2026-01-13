@@ -53,7 +53,7 @@ set :: b_block {
 # --------- Expressions and results ---------
 
 set :: sum      (1 + 2 * 3)          ; arithmetic expression inside ()
-set :: cmp_ok   (< 3 10)             ; comparison expression returning bool
+set :: cmp_ok   (3 < 10)             ; comparison expression returning bool
 set :: nested   ((1 + 2) * (3 + 4))  ; grouped arithmetic
 
 # --------- Variables and access ---------
