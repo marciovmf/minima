@@ -1,7 +1,8 @@
-#include "minima.h"
+#include "mi_parse.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
 
 //----------------------------------------------------------
 // Lexer
@@ -867,6 +868,9 @@ static MiExpr* s_parse_postfix(MiParser *p)
   return expr;
 }
 
+/**
+ * logical_or ::= logical_and ( '||' logical_and )
+ */
 static MiExpr* s_parse_or(MiParser *p)
 {
   MiExpr *left = s_parse_and(p);
@@ -900,6 +904,7 @@ static MiExpr* s_parse_or(MiParser *p)
   return left;
 }
 
+/** logical_and ::= equality ( '&&' equality ) */
 static MiExpr* s_parse_and(MiParser *p)
 {
   MiExpr *left = s_parse_equality(p);
@@ -933,6 +938,7 @@ static MiExpr* s_parse_and(MiParser *p)
   return left;
 }
 
+/** equality ::= comparison ( ( '==' | '!=' ) comparison )* */
 static MiExpr* s_parse_equality(MiParser *p)
 {
   MiExpr *left = s_parse_comparison(p);
@@ -971,6 +977,7 @@ static MiExpr* s_parse_equality(MiParser *p)
   return left;
 }
 
+/** comparison ::= term ( ( '<' | '<=' | '>' | '>=' ) term )* */
 static MiExpr* s_parse_comparison(MiParser *p)
 {
   MiExpr *left = s_parse_additive(p);
@@ -1013,6 +1020,7 @@ static MiExpr* s_parse_comparison(MiParser *p)
   return left;
 }
 
+/** term ::= factor ( ( '+' | '-' ) factor )* */
 static MiExpr* s_parse_additive(MiParser *p)
 {
   MiExpr *left = s_parse_multiplicative(p);
@@ -1052,6 +1060,7 @@ static MiExpr* s_parse_additive(MiParser *p)
   return left;
 }
 
+/** multiplicative ::= unary ( ( '*' | '/' | '%' ) unary )* */
 static MiExpr* s_parse_multiplicative(MiParser *p)
 {
   MiExpr *left = s_parse_unary(p);
@@ -1091,6 +1100,7 @@ static MiExpr* s_parse_multiplicative(MiParser *p)
   return left;
 }
 
+/** unary ::= ( '!' | '-' | '+' ) unary | primary */
 static MiExpr* s_parse_unary(MiParser *p)
 {
   MiTokenKind kind = s_parser_peek(p).kind;
@@ -1118,6 +1128,7 @@ static MiExpr* s_parse_unary(MiParser *p)
   return s_parse_postfix(p);
 }
 
+/** list_or_dict ::= '[' ( expression ( ',' expression )* )? ']' | '{' ( pair ( ',' pair )* )? '}' */
 static MiExpr* s_parse_list_or_dict(MiParser *p)
 {
   // '[' was already consumed
@@ -1239,6 +1250,7 @@ static MiExpr* s_parse_list_or_dict(MiParser *p)
   return expr;
 }
 
+/** literal ::= integer | float | string | boolean | null */
 static MiExpr* s_parse_block_literal(MiParser *p)
 {
   // '{' was already consumed
@@ -1264,6 +1276,7 @@ static MiExpr* s_parse_block_literal(MiParser *p)
   return expr;
 }
 
+/** primary ::= literal | identifier | '(' expression ')' */
 static MiExpr* s_parse_primary(MiParser *p)
 {
   MiToken tok = s_parser_peek(p);

@@ -11,8 +11,6 @@
 #include <stdx_log.h>
 
 #include "minima.h"
-#include "minima_runtime.h"
-
 
 int main(int argc, char **argv)
 {
@@ -50,7 +48,9 @@ int main(int argc, char **argv)
 
   MiRuntime rt;
   mi_rt_init(&rt);
-  mi_rt_eval_script(&rt, res.script);
+  mi_cmd_register_builtins(&rt);
+  mi_ast_backend_bind(&rt);
+  (void)mi_eval_script_ast(&rt, res.script);
   mi_rt_shutdown(&rt);
 
   x_arena_destroy(arena);

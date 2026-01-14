@@ -22,12 +22,13 @@ endfunction()
 set(STDX_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/src/include")
 
 list(APPEND SOURCES 
-  src/main.c
-  src/minima.h
-  src/minima.c
-  src/minima_runtime.h
-  src/minima_runtime.c)
-  
+  src/mi_eval_ast.c
+  src/mi_runtime.c
+  src/mi_vm.c
+  src/mi_parse.c
+  src/mi_cmd.c
+  src/mi_runtime.c
+  src/main.c)
 
 if(MSVC)
   configure_file(src/version.rc.in src/version.rc)
