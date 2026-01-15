@@ -7,7 +7,6 @@ set(VERSION_PATCH 0)
 set(VERSION_MINOR 0)
 set(VERSION_STRING ${VERSION_MAJOR}_${VERSION_MINOR}_${VERSION_PATCH})
 
-
 function(set_target_output_directory  target dir)
   foreach(conf "" "_DEBUG" "_RELEASE" "_RELWITHDEBINFO" "_MINSIZEREL")
     set_target_properties(${target} PROPERTIES
@@ -22,12 +21,12 @@ endfunction()
 set(STDX_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/src/include")
 
 list(APPEND SOURCES 
+  src/mi_bytecode.c
+  src/mi_compile.c
+  src/mi_parse.c
   src/mi_eval_ast.c
   src/mi_runtime.c
   src/mi_vm.c
-  src/mi_parse.c
-  src/mi_cmd.c
-  src/mi_runtime.c
   src/main.c)
 
 if(MSVC)

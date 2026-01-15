@@ -10,7 +10,55 @@
 #include <stdx_io.h>
 #include <stdx_log.h>
 
+#include <stdlib.h>
+#include <string.h>
 #include "minima.h"
+
+int test_compiler(XSlice source)
+{
+  MiCompiler  c;
+  MiProgram   out;
+  mi_compiler_init(&c, 4 * 1024);
+  bool success = mi_compile_script(&c, source, &out);
+
+  mi_disasm_program(stdout, &out);
+
+  mi_compiler_shutdown(&c);
+  return success ? 0 : 1;
+}
+
+int test_vm_eval(XSlice source)
+{
+  XArena* arena = x_arena_create(1024 * 32);
+  if (!arena)
+  {
+    mi_error("Failed to create arena\n");
+    return 1;
+  }
+
+  //MiParseResult res = mi_parse_program(source.ptr, source.length, arena);
+  //if (!res.ok || !res.script)
+  //{
+  //  x_arena_destroy(arena);
+  //  return 1;
+  //}
+
+  MiRuntime rt;
+  mi_rt_init(&rt);
+
+  MiVm vm;
+  mi_vm_init(&vm, &rt);
+
+  MiVmChunk* ch = mi_vm_compile_script(&vm, source);
+  mi_vm_disasm(ch);
+  (void)mi_vm_execute(&vm, ch);
+  mi_vm_chunk_destroy(ch);
+
+  mi_vm_shutdown(&vm);
+  mi_rt_shutdown(&rt);
+  x_arena_destroy(arena);
+  return 0;
+}
 
 int main(int argc, char **argv)
 {
@@ -23,37 +71,25 @@ int main(int argc, char **argv)
   const char* filename = argv[1];
   size_t src_len = 0;
   char *src = x_io_read_text(filename, &src_len);
-
   if (!src) { return 1; }
 
-  XArena *arena = x_arena_create(1024 * 16);
-  if (!arena)
+  XSlice source = x_slice_init(src, src_len);
+
+  int result = 0;
+  if (argc >= 3 && strcmp(argv[2], "--vm") == 0)
   {
-    mi_error("Failed to create arena\n");
-    free(src);
-    return 1;
+    result = test_vm_eval(source);
+  }
+  else
+  {
+    result = test_compiler(source);
   }
 
-  printf("-------------------- AST -----------------------\n");
-  MiParseResult res = mi_parse_program(src, src_len, arena);
-  mi_ast_debug_print_script(res.script);
+  if (result == 0)
+    mi_info("Success\n");
+  else
+    mi_error("Fail\n");
 
-  printf("------------------ EXECUTION -------------------\n");
-  if (!res.ok)
-  {
-    x_arena_destroy(arena);
-    free(src);
-    return 1;
-  }
-
-  MiRuntime rt;
-  mi_rt_init(&rt);
-  mi_cmd_register_builtins(&rt);
-  mi_ast_backend_bind(&rt);
-  (void)mi_eval_script_ast(&rt, res.script);
-  mi_rt_shutdown(&rt);
-
-  x_arena_destroy(arena);
   free(src);
-  return 0;
+  return result;
 }

@@ -19,7 +19,7 @@
 typedef struct MiVm MiVm;
 typedef struct MiVmChunk MiVmChunk;
 
-typedef MiRtCommandFn MiVmCommandFn;
+typedef MiRtValue (*MiVmCommandFn)(MiVm* vm, int argc, const MiRtValue* argv);
 
 typedef struct MiVmCommandEntry
 {
@@ -32,6 +32,7 @@ typedef enum MiVmOp
   MI_VM_OP_NOOP = 0,
   // Constants / moves
   MI_VM_OP_LOAD_CONST,  // a = const[imm]
+  MI_VM_OP_LOAD_BLOCK,  // a = new block from subchunk[imm] (captures env)
   MI_VM_OP_MOV,         // a = b
                         // Unary
   MI_VM_OP_NEG,
@@ -55,9 +56,15 @@ typedef enum MiVmOp
   MI_VM_OP_STORE_VAR,         // $sym[imm] = a
   MI_VM_OP_LOAD_INDIRECT_VAR, // a = $( regs[b] )
                               // Args + command calls
-  MI_VM_OP_PUSH_ARG,          // push regs[a]
+  MI_VM_OP_ARG_CLEAR,         // clear arg stack
+  MI_VM_OP_ARG_PUSH,          // push regs[a]
+  MI_VM_OP_ARG_PUSH_CONST,    // push const[imm]
+  MI_VM_OP_ARG_PUSH_VAR_SYM,  // push $sym[imm]
+  MI_VM_OP_ARG_PUSH_SYM,
   MI_VM_OP_CALL_CMD,          // a = call cmd_fn[imm] with argc=b
   MI_VM_OP_CALL_CMD_DYN,      // a = call by name in regs[b], argc=c
+
+  MI_VM_OP_CALL_BLOCK,        // a = call regs[b] (block) with argc=c
   // Control
   MI_VM_OP_JUMP,
   MI_VM_OP_JUMP_IF_TRUE,
@@ -93,6 +100,10 @@ struct MiVmChunk
   XSlice*        cmd_names;   // optional: for debug
   size_t         cmd_count;
   size_t         cmd_capacity;
+
+  MiVmChunk**    subchunks;      // block literal payloads
+  size_t         subchunk_count;
+  size_t         subchunk_capacity;
 };
 
 struct MiVm
@@ -122,8 +133,7 @@ bool      mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn);
 bool      mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn);
 
 /* Compile a script to bytecode chunk using the provided arena for allocations. */
-MiVmChunk* mi_vm_compile_script(MiVm* vm, const MiScript* script, XArena* arena);
-
+MiVmChunk* mi_vm_compile_script(MiVm* vm, XSlice source);
 /* Destroy a chunk created by mi_vm_compile_script (frees heap allocations). */
 void      mi_vm_chunk_destroy(MiVmChunk* chunk);
 

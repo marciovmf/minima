@@ -1,4 +1,6 @@
 #include "mi_parse.h"
+#include "mi_fold.h"
+#include "mi_log.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -611,7 +613,9 @@ static MiScript* s_parse_script(MiParser *p, bool stop_at_rbrace)
     {
       if (p->had_error)
       {
-        printf("Parsing error %d,%d - %.*s\n", p->error_line, p->error_column, (int) p->error_message.length, p->error_message.ptr);
+        mi_error_fmt("Parsing error %d,%d - %.*s\n",
+            p->error_line, p->error_column,
+            (int) p->error_message.length, p->error_message.ptr);
         break;
       }
       else
@@ -1749,6 +1753,14 @@ MiParseResult mi_parse_program(const char *source,
     size_t      source_len,
     XArena     *arena)
 {
+  return mi_parse_program_ex(source, source_len, arena, false);
+}
+
+MiParseResult mi_parse_program_ex(const char *source,
+    size_t      source_len,
+    XArena     *arena,
+    bool        fold_constants)
+{
   MiParseResult result;
   result.ok            = false;
   result.script        = NULL;
@@ -1763,12 +1775,18 @@ MiParseResult mi_parse_program(const char *source,
 
   if (p.had_error)
   {
-    result.ok           = false;
-    result.script       = NULL;
-    result.error_line   = p.error_line;
-    result.error_column = p.error_column;
+    result.ok            = false;
+    result.script        = NULL;
+    result.error_line    = p.error_line;
+    result.error_column  = p.error_column;
     result.error_message = p.error_message;
     return result;
+  }
+
+  if (fold_constants)
+  {
+    /* mi_fold_constants_ast currently ignores the runtime parameter. */
+    mi_fold_constants_ast(NULL, script);
   }
 
   result.ok     = true;

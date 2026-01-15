@@ -207,6 +207,15 @@ MiParseResult mi_parse_program(const char *source,
     size_t      source_len,
     XArena     *arena);
 
+/**
+ * Parse a full Minima script, optionally applying constant folding.
+ * When fold_constants is true, the resulting AST is simplified in-place.
+ */
+MiParseResult mi_parse_program_ex(const char *source,
+    size_t      source_len,
+    XArena     *arena,
+    bool        fold_constants);
+
 //----------------------------------------------------------
 // Debug print helpers
 //----------------------------------------------------------

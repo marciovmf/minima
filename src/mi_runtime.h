@@ -18,6 +18,7 @@ typedef struct MiRtValue MiRtValue;
 typedef struct MiRtList MiRtList;
 typedef struct MiRtPair MiRtPair;
 typedef struct MiRtBlock MiRtBlock;
+typedef struct MiScopeFrame MiScopeFrame;
 
 typedef enum MiRtValueKind
 {
@@ -72,6 +73,7 @@ struct MiRtBlock
 {
   MiRtBlockKind kind;
   void*         ptr;      // AST payloads
+  MiScopeFrame* env;      // Defining environment (VM blocks)
   uint32_t      id;       // VM chunk id or user id
 };
 
@@ -145,6 +147,22 @@ void mi_rt_shutdown(MiRuntime* rt);
  * @param rt Runtime instance.
  */
 void mi_rt_scope_push(MiRuntime* rt);
+
+/**
+ * Push a new scope frame with an explicit parent frame.
+ * This is used by the VM to implement lexical scoping for blocks.
+ * @param rt     Runtime instance.
+ * @param parent Parent frame to chain to (may be NULL for root).
+ */
+void mi_rt_scope_push_with_parent(MiRuntime* rt, MiScopeFrame* parent);
+
+/**
+ * Push a new scope frame with an explicit parent.
+ * This is used by VM blocks to implement lexical-ish environment chains.
+ * @param rt     Runtime instance.
+ * @param parent Parent frame for the new frame.
+ */
+void mi_rt_scope_push_with_parent(MiRuntime* rt, MiScopeFrame* parent);
 
 /**
  * Pop the current scope frame.

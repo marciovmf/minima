@@ -1,5 +1,4 @@
 #include "mi_eval_ast.h"
-#include "mi_cmd.h"
 #include "mi_log.h"
 
 #include <stdlib.h>
@@ -374,6 +373,26 @@ MiRtValue mi_eval_expr_ast(MiRuntime* rt, const MiExpr* expr)
 // Commands
 //----------------------------------------------------------
 
+MiRtCommandFn mi_cmd_find(MiRuntime* rt, XSlice name)
+{
+  size_t i;
+
+  if (!rt)
+  {
+    return NULL;
+  }
+
+  for (i = 0u; i < rt->command_count; ++i)
+  {
+    if (x_slice_eq(rt->commands[i].name, name))
+    {
+      return rt->commands[i].fn;
+    }
+  }
+
+  return NULL;
+}
+
 static MiRtValue s_eval_command_expr(MiRuntime* rt, const MiExpr* expr)
 {
   if (!expr || expr->kind != MI_EXPR_COMMAND)
@@ -591,7 +610,9 @@ static void s_fold_program(const MiScript* script)
   MiRuntime tmp;
   mi_rt_init(&tmp);
   mi_ast_backend_bind(&tmp);
-  mi_cmd_register_builtins(&tmp);
+ 
+  // We do not register builtins because we do not actuall execute code
+  //mi_cmd_register_builtins(&tmp);
 
   const MiCommandList* it = script->first;
   while (it)

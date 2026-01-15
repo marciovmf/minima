@@ -143,6 +143,11 @@ void mi_rt_shutdown(MiRuntime* rt)
 
 void mi_rt_scope_push(MiRuntime* rt)
 {
+  mi_rt_scope_push_with_parent(rt, rt ? rt->current : NULL);
+}
+
+void mi_rt_scope_push_with_parent(MiRuntime* rt, MiScopeFrame* parent)
+{
   if (!rt)
   {
     return;
@@ -154,14 +159,14 @@ void mi_rt_scope_push(MiRuntime* rt)
     f = rt->free_frames;
     rt->free_frames = f->next_free;
     f->next_free = NULL;
-    f->parent = rt->current;
+    f->parent = parent;
     x_arena_reset(f->arena);
     f->vars = NULL;
   }
   else
   {
     f = (MiScopeFrame*)s_realloc(NULL, sizeof(MiScopeFrame));
-    s_scope_init(f, rt->scope_chunk_size, rt->current);
+    s_scope_init(f, rt->scope_chunk_size, parent);
   }
 
   rt->current = f;
@@ -299,6 +304,7 @@ MiRtBlock* mi_rt_block_create(MiRuntime* rt)
 
   b->kind = MI_RT_BLOCK_INVALID;
   b->ptr = NULL;
+  b->env = NULL;
   b->id = 0u;
   return b;
 }

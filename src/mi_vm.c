@@ -1,5 +1,6 @@
 #include "mi_vm.h"
 #include "mi_log.h"
+#include "mi_fold.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,8 @@
 //----------------------------------------------------------
 // Internal helpers
 //----------------------------------------------------------
+
+static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XArena* arena);
 
 static void* s_realloc(void* ptr, size_t size)
 {
@@ -44,78 +47,149 @@ static bool s_slice_eq(const XSlice a, const XSlice b)
  * Once the instruction set stabilizes, maybe I'll switch to stdx_hashtable.
  */
 
+#if 1
 //----------------------------------------------------------
 // VM builtins (minimal starter set)
 //----------------------------------------------------------
 
-static void s_vm_print_value(const MiRtValue* v)
+static void s_vm_print_value_inline(const MiRtValue* v)
 {
   switch (v->kind)
   {
-    case MI_RT_VAL_VOID:   printf("()\n"); break;
-    case MI_RT_VAL_INT:    printf("%lld\n", v->as.i); break;
-    case MI_RT_VAL_FLOAT:  printf("%g\n", v->as.f); break;
-    case MI_RT_VAL_BOOL:   printf("%s\n", v->as.b ? "true" : "false"); break;
-    case MI_RT_VAL_STRING: printf("%.*s\n", (int) v->as.s.length, v->as.s.ptr); break;
-
-    case MI_RT_VAL_LIST:
-                           {
-                             printf("[");
-                             for (size_t i = 0; i < v->as.list->count; ++i)
-                             {
-                               const MiRtValue* it = &v->as.list->items[i];
-                               if (i != 0)
-                               {
-                                 printf(", ");
-                               }
-                               if (it->kind == MI_RT_VAL_STRING)
-                               {
-                                 printf("\"%.*s\"", (int) it->as.s.length, it->as.s.ptr);
-                               }
-                               else if (it->kind == MI_RT_VAL_INT)
-                               {
-                                 printf("%lld", it->as.i);
-                               }
-                               else if (it->kind == MI_RT_VAL_FLOAT)
-                               {
-                                 printf("%g", it->as.f);
-                               }
-                               else if (it->kind == MI_RT_VAL_BOOL)
-                               {
-                                 printf("%s", it->as.b ? "true" : "false");
-                               }
-                               else
-                               {
-                                 printf("<%d>", (int) it->kind);
-                               }
-                             }
-                             printf("]\n");
-                           } break;
-
-    case MI_RT_VAL_BLOCK:  printf("{...}\n"); break;
-    case MI_RT_VAL_PAIR:   printf("<pair>\n"); break;
-    default:               printf("<unknown>\n"); break;
+    case MI_RT_VAL_VOID:   printf("()"); break;
+    case MI_RT_VAL_INT:    printf("%lld", v->as.i); break;
+    case MI_RT_VAL_FLOAT:  printf("%g", v->as.f); break;
+    case MI_RT_VAL_BOOL:   printf("%s", v->as.b ? "true" : "false"); break;
+    case MI_RT_VAL_STRING: printf("%.*s", (int) v->as.s.length, v->as.s.ptr); break;
+    case MI_RT_VAL_LIST:   printf("[list]"); break;
+    case MI_RT_VAL_BLOCK:  printf("{...}"); break;
+    case MI_RT_VAL_PAIR:   printf("<pair>"); break;
+    default:               printf("<unknown>"); break;
   }
 }
 
-static MiRtValue s_vm_cmd_print(MiRuntime* rt, const XSlice* head_name, int argc, MiExprList* args)
+static void s_vm_value_to_string(char* out, size_t cap, const MiRtValue* v)
 {
-  (void) rt;
-  (void) head_name;
+  if (!out || cap == 0u)
+  {
+    return;
+  }
 
-  (void) argc;
-  (void) args;
+  out[0] = '\0';
+
+  if (!v)
+  {
+    (void)snprintf(out, cap, "<null>");
+    return;
+  }
+
+  switch (v->kind)
+  {
+    case MI_RT_VAL_VOID:   (void)snprintf(out, cap, "()"); break;
+    case MI_RT_VAL_INT:    (void)snprintf(out, cap, "%lld", v->as.i); break;
+    case MI_RT_VAL_FLOAT:  (void)snprintf(out, cap, "%g", v->as.f); break;
+    case MI_RT_VAL_BOOL:   (void)snprintf(out, cap, "%s", v->as.b ? "true" : "false"); break;
+    case MI_RT_VAL_STRING: (void)snprintf(out, cap, "%.*s", (int)v->as.s.length, v->as.s.ptr); break;
+    case MI_RT_VAL_LIST:   (void)snprintf(out, cap, "[list]"); break;
+    case MI_RT_VAL_BLOCK:  (void)snprintf(out, cap, "{...}"); break;
+    case MI_RT_VAL_PAIR:   (void)snprintf(out, cap, "<pair>"); break;
+    default:               (void)snprintf(out, cap, "<unknown>"); break;
+  }
+}
+
+static MiRtValue s_vm_cmd_print(MiVm* vm, int argc, const MiRtValue* argv)
+{
+  (void) vm;
+
+  for (int i = 0; i < argc; ++i)
+  {
+    if (i != 0)
+    {
+      printf(" ");
+    }
+    s_vm_print_value_inline(&argv[i]);
+  }
+  printf("\n");
   return mi_rt_make_void();
 }
 
-static MiRtValue s_vm_cmd_set(MiRuntime* rt, const XSlice* head_name, int argc, MiExprList* args)
+static MiRtValue s_vm_cmd_set(MiVm* vm, int argc, const MiRtValue* argv)
 {
-  (void) head_name;
+  if (!vm || !vm->rt)
+  {
+    return mi_rt_make_void();
+  }
 
-  (void) rt;
-  (void) argc;
-  (void) args;
-  return mi_rt_make_void();
+  if (argc != 2)
+  {
+    mi_error("set: expected 2 arguments\n");
+    return mi_rt_make_void();
+  }
+
+  if (argv[0].kind != MI_RT_VAL_STRING)
+  {
+    mi_error("set: first argument must be a string variable name\n");
+    return mi_rt_make_void();
+  }
+
+  (void) mi_rt_var_set(vm->rt, argv[0].as.s, argv[1]);
+  return argv[1];
+}
+
+static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value);
+
+static MiRtValue s_vm_cmd_call(MiVm* vm, int argc, const MiRtValue* argv)
+{
+  if (argc != 1)
+  {
+    mi_error("call: expected 1 argument\n");
+    return mi_rt_make_void();
+  }
+
+  return s_vm_exec_block_value(vm, argv[0]);
+}
+
+
+#endif
+
+static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value)
+{
+  if (!vm || !vm->rt)
+  {
+    return mi_rt_make_void();
+  }
+
+  if (block_value.kind != MI_RT_VAL_BLOCK || !block_value.as.block)
+  {
+    mi_error("call: expected block\n");
+    return mi_rt_make_void();
+  }
+
+  MiRtBlock* b = block_value.as.block;
+  if (b->kind != MI_RT_BLOCK_VM_CHUNK || !b->ptr)
+  {
+    mi_error("call: expected VM block\n");
+    return mi_rt_make_void();
+  }
+
+  MiVmChunk* sub = (MiVmChunk*)b->ptr;
+  MiScopeFrame* parent = b->env ? b->env : vm->rt->current;
+
+  MiRtValue saved_regs[256];
+  MiRtValue saved_args[256];
+  int saved_arg_top = vm->arg_top;
+  memcpy(saved_regs, vm->regs, sizeof(saved_regs));
+  memcpy(saved_args, vm->arg_stack, sizeof(saved_args));
+
+  mi_rt_scope_push_with_parent(vm->rt, parent);
+  MiRtValue ret = mi_vm_execute(vm, sub);
+  mi_rt_scope_pop(vm->rt);
+
+  memcpy(vm->regs, saved_regs, sizeof(saved_regs));
+  memcpy(vm->arg_stack, saved_args, sizeof(saved_args));
+  vm->arg_top = saved_arg_top;
+
+  return ret;
 }
 
 //----------------------------------------------------------
@@ -131,6 +205,7 @@ void mi_vm_init(MiVm* vm, MiRuntime* rt)
   // Minimal builtins to get started.
   (void) mi_vm_register_command(vm, x_slice_from_cstr("print"), s_vm_cmd_print);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("set"),   s_vm_cmd_set);
+  (void) mi_vm_register_command(vm, x_slice_from_cstr("call"),  s_vm_cmd_call);
 }
 
 void mi_vm_shutdown(MiVm* vm)
@@ -195,6 +270,15 @@ void mi_vm_chunk_destroy(MiVmChunk* chunk)
   if (!chunk)
   {
     return;
+  }
+
+  if (chunk->subchunks)
+  {
+    for (size_t i = 0; i < chunk->subchunk_count; ++i)
+    {
+      mi_vm_chunk_destroy(chunk->subchunks[i]);
+    }
+    free(chunk->subchunks);
   }
 
   free(chunk->code);
@@ -296,6 +380,25 @@ static int32_t s_chunk_add_cmd_fn(MiVmChunk* c, XSlice name, MiVmCommandFn fn)
   return idx;
 }
 
+static int32_t s_chunk_add_subchunk(MiVmChunk* c, MiVmChunk* sub)
+{
+  if (!c || !sub)
+  {
+    return -1;
+  }
+
+  if (c->subchunk_count == c->subchunk_capacity)
+  {
+    size_t new_cap = c->subchunk_capacity ? c->subchunk_capacity * 2u : 16u;
+    c->subchunks = (MiVmChunk**)s_realloc(c->subchunks, new_cap * sizeof(*c->subchunks));
+    c->subchunk_capacity = new_cap;
+  }
+
+  int32_t idx = (int32_t)c->subchunk_count;
+  c->subchunks[c->subchunk_count++] = sub;
+  return idx;
+}
+
 //----------------------------------------------------------
 // Compiler (AST -> bytecode)
 //----------------------------------------------------------
@@ -306,6 +409,8 @@ typedef struct MiVmBuild
   MiVmChunk*  chunk;
   uint8_t     next_reg;
 } MiVmBuild;
+
+static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e);
 
 static uint8_t s_alloc_reg(MiVmBuild* b)
 {
@@ -347,18 +452,67 @@ static MiVmOp s_map_binary(MiTokenKind op)
   }
 }
 
-static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e);
-
 static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
 {
   uint8_t dst = s_alloc_reg(b);
   uint8_t argc = 0;
 
+  /* Start a fresh argument list for every call.
+     This also makes disassembly easier to read. */
+  s_chunk_emit(b->chunk, MI_VM_OP_ARG_CLEAR, 0, 0, 0, 0);
+
+  /* Special form: call :: <block>
+     This compiles to a direct CALL_BLOCK, bypassing command dispatch. */
+  if (e->as.command.head &&
+      e->as.command.head->kind == MI_EXPR_STRING_LITERAL &&
+      s_slice_eq(e->as.command.head->as.string_lit.value, x_slice_from_cstr("call")) &&
+      e->as.command.argc == 1u)
+  {
+    const MiExprList* only = e->as.command.args;
+    uint8_t block_reg = s_compile_expr(b, only ? only->expr : NULL);
+    s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+    return dst;
+  }
+
   const MiExprList* it = e->as.command.args;
   while (it)
   {
-    uint8_t r = s_compile_expr(b, it->expr);
-    s_chunk_emit(b->chunk, MI_VM_OP_PUSH_ARG, r, 0, 0, 0);
+    const MiExpr* arg = it->expr;
+
+    /* Fast-path: literal constants can be pushed directly. */
+    if (arg && (arg->kind == MI_EXPR_INT_LITERAL ||
+          arg->kind == MI_EXPR_FLOAT_LITERAL ||
+          arg->kind == MI_EXPR_BOOL_LITERAL ||
+          arg->kind == MI_EXPR_VOID_LITERAL ||
+          arg->kind == MI_EXPR_STRING_LITERAL))
+    {
+      MiRtValue v = mi_rt_make_void();
+      if (arg->kind == MI_EXPR_INT_LITERAL)   v = mi_rt_make_int(arg->as.int_lit.value);
+      if (arg->kind == MI_EXPR_FLOAT_LITERAL) v = mi_rt_make_float(arg->as.float_lit.value);
+      if (arg->kind == MI_EXPR_BOOL_LITERAL)  v = mi_rt_make_bool(arg->as.bool_lit.value);
+      if (arg->kind == MI_EXPR_VOID_LITERAL)  v = mi_rt_make_void();
+      if (arg->kind == MI_EXPR_STRING_LITERAL)v = mi_rt_make_string_slice(arg->as.string_lit.value);
+
+      int32_t k = s_chunk_add_const(b->chunk, v);
+      s_chunk_emit(b->chunk, MI_VM_OP_ARG_PUSH_CONST, 0, 0, 0, k);
+      argc++;
+      it = it->next;
+      continue;
+    }
+
+    /* Fast-path: direct variable reference (non-indirect) can be pushed without staging. */
+    if (arg && arg->kind == MI_EXPR_VAR && !arg->as.var.is_indirect)
+    {
+      int32_t sym = s_chunk_add_symbol(b->chunk, arg->as.var.name);
+      s_chunk_emit(b->chunk, MI_VM_OP_ARG_PUSH_VAR_SYM, 0, 0, 0, sym);
+      argc++;
+      it = it->next;
+      continue;
+    }
+
+    /* Fallback: compute into a register then push. */
+    uint8_t r = s_compile_expr(b, arg);
+    s_chunk_emit(b->chunk, MI_VM_OP_ARG_PUSH, r, 0, 0, 0);
     argc++;
     it = it->next;
   }
@@ -475,6 +629,22 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
     case MI_EXPR_COMMAND:
       return s_compile_command_expr(b, e);
 
+    case MI_EXPR_BLOCK:
+      {
+        uint8_t r = s_alloc_reg(b);
+        MiVmChunk* sub = s_vm_compile_script_ast(b->vm, e->as.block.script, NULL);
+        if (!sub)
+        {
+          int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+          s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, r, 0, 0, k);
+          return r;
+        }
+
+        int32_t id = s_chunk_add_subchunk(b->chunk, sub);
+        s_chunk_emit(b->chunk, MI_VM_OP_LOAD_BLOCK, r, 0, 0, id);
+        return r;
+      }
+
     default:
       {
         mi_error_fmt("mi_vm: unsupported expr kind: %d\n", (int) e->kind);
@@ -486,9 +656,18 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
   }
 }
 
-MiVmChunk* mi_vm_compile_script(MiVm* vm, const MiScript* script, XArena* arena)
+static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XArena* arena)
 {
   (void) arena;
+
+  if (!vm || !script)
+  {
+    return NULL;
+  }
+
+  /* Ensure the VM pipeline gets a folded AST. This is a pure simplification
+     pass; it will not execute variables or commands. */
+  mi_fold_constants_ast(NULL, script);
 
   MiVmChunk* chunk = s_chunk_create();
 
@@ -520,6 +699,56 @@ MiVmChunk* mi_vm_compile_script(MiVm* vm, const MiScript* script, XArena* arena)
 
   return chunk;
 }
+
+MiVmChunk* mi_vm_compile_script(MiVm* vm, XSlice source)
+{
+  if (!vm)
+  {
+    return NULL;
+  }
+
+  /* Ensure runtime exists and builtins are registered. We keep this very
+     conservative to avoid changing behavior elsewhere. */
+  if (!vm->rt)
+  {
+    static MiRuntime s_rt;
+    static bool s_rt_inited = false;
+    if (!s_rt_inited)
+    {
+      mi_rt_init(&s_rt);
+      s_rt_inited = true;
+    }
+    vm->rt = &s_rt;
+  }
+
+  if (!vm->commands && vm->command_count == 0)
+  {
+    /* Register minimal builtins, matching mi_vm_init(). */
+    vm->arg_top = 0;
+    (void) mi_vm_register_command(vm, x_slice_from_cstr("print"), s_vm_cmd_print);
+    (void) mi_vm_register_command(vm, x_slice_from_cstr("set"),   s_vm_cmd_set);
+    (void) mi_vm_register_command(vm, x_slice_from_cstr("call"),  s_vm_cmd_call);
+  }
+
+  XArena* arena = x_arena_create(1024 * 64);
+  if (!arena)
+  {
+    return NULL;
+  }
+
+  MiParseResult res = mi_parse_program_ex(source.ptr, source.length, arena, true);
+  if (!res.ok || !res.script)
+  {
+    x_arena_destroy(arena);
+    return NULL;
+  }
+
+  MiVmChunk* chunk = s_vm_compile_script_ast(vm, res.script, arena);
+
+  x_arena_destroy(arena);
+  return chunk;
+}
+
 
 //----------------------------------------------------------
 // Execution
@@ -615,6 +844,23 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
       case MI_VM_OP_LOAD_CONST:
         vm->regs[ins.a] = chunk->consts[ins.imm];
         break;
+
+      case MI_VM_OP_LOAD_BLOCK:
+        {
+          if (ins.imm < 0 || (size_t)ins.imm >= chunk->subchunk_count)
+          {
+            mi_error("mi_vm: LOAD_BLOCK invalid subchunk index\n");
+            vm->regs[ins.a] = mi_rt_make_void();
+            break;
+          }
+
+          MiRtBlock* b = mi_rt_block_create(vm->rt);
+          b->kind = MI_RT_BLOCK_VM_CHUNK;
+          b->ptr = (void*)chunk->subchunks[(size_t)ins.imm];
+          b->env = vm->rt->current;
+          b->id = (uint32_t)ins.imm;
+          vm->regs[ins.a] = mi_rt_make_block(b);
+        } break;
 
       case MI_VM_OP_MOV:
         vm->regs[ins.a] = vm->regs[ins.b];
@@ -733,7 +979,11 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           vm->regs[ins.a] = v;
         } break;
 
-      case MI_VM_OP_PUSH_ARG:
+      case MI_VM_OP_ARG_CLEAR:
+        vm->arg_top = 0;
+        break;
+
+      case MI_VM_OP_ARG_PUSH:
         {
           if (vm->arg_top >= 256)
           {
@@ -741,6 +991,45 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             break;
           }
           vm->arg_stack[vm->arg_top++] = vm->regs[ins.a];
+        } break;
+
+      case MI_VM_OP_ARG_PUSH_CONST:
+        {
+          if (vm->arg_top >= 256)
+          {
+            mi_error("mi_vm: arg stack overflow\n");
+            break;
+          }
+          if (ins.imm < 0 || (size_t)ins.imm >= chunk->const_count)
+          {
+            mi_error("mi_vm: ARG_PUSH_CONST invalid const index\n");
+            vm->arg_stack[vm->arg_top++] = mi_rt_make_void();
+            break;
+          }
+          vm->arg_stack[vm->arg_top++] = chunk->consts[ins.imm];
+        } break;
+
+      case MI_VM_OP_ARG_PUSH_VAR_SYM:
+        {
+          if (vm->arg_top >= 256)
+          {
+            mi_error("mi_vm: arg stack overflow\n");
+            break;
+          }
+          if (ins.imm < 0 || (size_t)ins.imm >= chunk->symbol_count)
+          {
+            mi_error("mi_vm: ARG_PUSH_VAR_SYM invalid symbol index\n");
+            vm->arg_stack[vm->arg_top++] = mi_rt_make_void();
+            break;
+          }
+          XSlice name = chunk->symbols[ins.imm];
+          MiRtValue v;
+          if (!mi_rt_var_get(vm->rt, name, &v))
+          {
+            mi_error_fmt("undefined variable: %.*s\n", (int)name.length, name.ptr);
+            v = mi_rt_make_void();
+          }
+          vm->arg_stack[vm->arg_top++] = v;
         } break;
 
       case MI_VM_OP_CALL_CMD:
@@ -759,10 +1048,15 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             argv[i] = vm->arg_stack[--vm->arg_top];
           }
 
-          (void) argv;
-          (void) chunk;
-          mi_error("mi_vm: CALL_CMD not supported yet\n");
-          vm->regs[ins.a] = mi_rt_make_void();
+          MiVmCommandFn fn = chunk->cmd_fns[ins.imm];
+          if (!fn)
+          {
+            mi_error("mi_vm: CALL_CMD null function\n");
+            vm->regs[ins.a] = mi_rt_make_void();
+            break;
+          }
+
+          vm->regs[ins.a] = fn(vm, argc, argv);
           last = vm->regs[ins.a];
         } break;
 
@@ -790,10 +1084,23 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             argv[i] = vm->arg_stack[--vm->arg_top];
           }
 
-          (void) argv;
-          mi_error("mi_vm: CALL_CMD_DYN not supported yet\n");
-          vm->regs[ins.a] = mi_rt_make_void();
+          MiVmCommandFn fn = s_vm_find_command_fn(vm, head.as.s);
+          if (!fn)
+          {
+            mi_error_fmt("mi_vm: unknown command: %.*s\n", (int)head.as.s.length, head.as.s.ptr);
+            vm->regs[ins.a] = mi_rt_make_void();
+            break;
+          }
+
+          vm->regs[ins.a] = fn(vm, argc, argv);
           last = vm->regs[ins.a];
+        } break;
+
+      case MI_VM_OP_CALL_BLOCK:
+        {
+          MiRtValue ret = s_vm_exec_block_value(vm, vm->regs[ins.b]);
+          vm->regs[ins.a] = ret;
+          last = ret;
         } break;
 
       case MI_VM_OP_HALT:
@@ -816,36 +1123,42 @@ static const char* s_op_name(MiVmOp op)
 {
   switch (op)
   {
-    case MI_VM_OP_NOOP: return "NOOP";
-    case MI_VM_OP_LOAD_CONST: return "LOAD_CONST";
-    case MI_VM_OP_MOV: return "MOV";
-    case MI_VM_OP_NEG: return "NEG";
-    case MI_VM_OP_NOT: return "NOT";
-    case MI_VM_OP_ADD: return "ADD";
-    case MI_VM_OP_SUB: return "SUB";
-    case MI_VM_OP_MUL: return "MUL";
-    case MI_VM_OP_DIV: return "DIV";
-    case MI_VM_OP_MOD: return "MOD";
-    case MI_VM_OP_EQ: return "EQ";
-    case MI_VM_OP_NEQ: return "NEQ";
-    case MI_VM_OP_LT: return "LT";
-    case MI_VM_OP_LTEQ: return "LTEQ";
-    case MI_VM_OP_GT: return "GT";
-    case MI_VM_OP_GTEQ: return "GTEQ";
-    case MI_VM_OP_AND: return "AND";
-    case MI_VM_OP_OR: return "OR";
-    case MI_VM_OP_LOAD_VAR: return "LOAD_VAR";
-    case MI_VM_OP_STORE_VAR: return "STORE_VAR";
-    case MI_VM_OP_LOAD_INDIRECT_VAR: return "LOAD_INDIRECT_VAR";
-    case MI_VM_OP_PUSH_ARG: return "PUSH_ARG";
-    case MI_VM_OP_CALL_CMD: return "CALL_CMD";
-    case MI_VM_OP_CALL_CMD_DYN: return "CALL_CMD_DYN";
-    case MI_VM_OP_JUMP: return "JUMP";
-    case MI_VM_OP_JUMP_IF_TRUE: return "JUMP_IF_TRUE";
-    case MI_VM_OP_JUMP_IF_FALSE: return "JUMP_IF_FALSE";
-    case MI_VM_OP_RETURN: return "RETURN";
-    case MI_VM_OP_HALT: return "HALT";
-    default: return "?";
+    case MI_VM_OP_NOOP:               return "NOP";
+    case MI_VM_OP_LOAD_CONST:         return "LDC";
+    case MI_VM_OP_LOAD_BLOCK:         return "LDB";
+    case MI_VM_OP_MOV:                return "MOV";
+    case MI_VM_OP_NEG:                return "NEG";
+    case MI_VM_OP_NOT:                return "NOT";
+    case MI_VM_OP_ADD:                return "ADD";
+    case MI_VM_OP_SUB:                return "SUB";
+    case MI_VM_OP_MUL:                return "MUL";
+    case MI_VM_OP_DIV:                return "DIV";
+    case MI_VM_OP_MOD:                return "MOD";
+    case MI_VM_OP_EQ:                 return "EQ";
+    case MI_VM_OP_NEQ:                return "NEQ";
+    case MI_VM_OP_LT:                 return "LT";
+    case MI_VM_OP_LTEQ:               return "LTEQ";
+    case MI_VM_OP_GT:                 return "GT";
+    case MI_VM_OP_GTEQ:               return "GTEQ";
+    case MI_VM_OP_AND:                return "AND";
+    case MI_VM_OP_OR:                 return "OR";
+    case MI_VM_OP_LOAD_VAR:           return "LDV";
+    case MI_VM_OP_STORE_VAR:          return "STV";
+    case MI_VM_OP_LOAD_INDIRECT_VAR:  return "LDIV";
+    case MI_VM_OP_ARG_CLEAR:          return "ACLR";
+    case MI_VM_OP_ARG_PUSH:           return "APR";
+    case MI_VM_OP_ARG_PUSH_CONST:     return "APC";
+    case MI_VM_OP_ARG_PUSH_VAR_SYM:   return "APV";
+    case MI_VM_OP_ARG_PUSH_SYM:       return "APS";
+    case MI_VM_OP_CALL_CMD:           return "CALL";
+    case MI_VM_OP_CALL_CMD_DYN:       return "DCALL";
+    case MI_VM_OP_CALL_BLOCK:         return "BCALL";
+    case MI_VM_OP_JUMP:               return "JMP";
+    case MI_VM_OP_JUMP_IF_TRUE:       return "JT";
+    case MI_VM_OP_JUMP_IF_FALSE:      return "JF";
+    case MI_VM_OP_RETURN:             return "RET";
+    case MI_VM_OP_HALT:               return "HALT";
+    default: mi_error_fmt("Unknown opcode %X\n", op); return "?";
   }
 }
 
@@ -856,15 +1169,323 @@ void mi_vm_disasm(const MiVmChunk* chunk)
     return;
   }
 
+  printf("=== VM CHUNK ===\n");
+  printf("code:   %zu ins\n", chunk->code_count);
+  printf("consts: %zu\n", chunk->const_count);
+  printf("syms:   %zu\n", chunk->symbol_count);
+  printf("cmds:   %zu\n", chunk->cmd_count);
+  printf("subs:   %zu\n", chunk->subchunk_count);
+
+  if (chunk->const_count)
+  {
+    printf("\n-- const pool --\n");
+    for (size_t i = 0; i < chunk->const_count; ++i)
+    {
+      printf("  const_%zu ", i);
+      s_vm_print_value_inline(&chunk->consts[i]);
+      printf("\n");
+    }
+  }
+
+  if (chunk->symbol_count)
+  {
+    printf("\n-- symbols --\n");
+    for (size_t i = 0; i < chunk->symbol_count; ++i)
+    {
+      XSlice s = chunk->symbols[i];
+      printf("  sym_%zu %.*s\n", i, (int)s.length, s.ptr);
+    }
+  }
+
+  if (chunk->cmd_count)
+  {
+    printf("\n-- commands --\n");
+    for (size_t i = 0; i < chunk->cmd_count; ++i)
+    {
+      const char* name = "<unnamed>";
+      int name_len = 9;
+      if (chunk->cmd_names)
+      {
+        XSlice s = chunk->cmd_names[i];
+        name = s.ptr;
+        name_len = (int)s.length;
+      }
+      printf("  cmd_%zu %.*s\n", i, name_len, name);
+    }
+  }
+
+  printf("\n-- code --\n");
   for (size_t i = 0; i < chunk->code_count; ++i)
   {
     MiVmIns ins = chunk->code[i];
-    printf("%04zu  %-16s a=%u b=%u c=%u imm=%d\n",
-        i,
-        s_op_name((MiVmOp) ins.op),
-        (unsigned) ins.a,
-        (unsigned) ins.b,
-        (unsigned) ins.c,
-        (int) ins.imm);
+    MiVmOp op = (MiVmOp)ins.op;
+
+    uint8_t bytes[8];
+    bytes[0] = ins.op;
+    bytes[1] = ins.a;
+    bytes[2] = ins.b;
+    bytes[3] = ins.c;
+    uint32_t uimm = (uint32_t)ins.imm;
+    bytes[4] = (uint8_t)(uimm & 0xFFu);
+    bytes[5] = (uint8_t)((uimm >> 8) & 0xFFu);
+    bytes[6] = (uint8_t)((uimm >> 16) & 0xFFu);
+    bytes[7] = (uint8_t)((uimm >> 24) & 0xFFu);
+
+    size_t pc = i * sizeof(MiVmIns);
+
+    /* Print prefix: pc + raw bytes */
+    printf("0x%08zx  %02X %02X %02X %02X %02X %02X %02X %02X   ",
+        pc,
+        (unsigned)bytes[0],
+        (unsigned)bytes[1],
+        (unsigned)bytes[2],
+        (unsigned)bytes[3],
+        (unsigned)bytes[4],
+        (unsigned)bytes[5],
+        (unsigned)bytes[6],
+        (unsigned)bytes[7]);
+
+    /* Build the instruction text (no comment) and an optional comment,
+       then print them with a fixed comment column. */
+    char instr[160];
+    char comment[160];
+    instr[0] = '\0';
+    comment[0] = '\0';
+
+    switch (op)
+    {
+      case MI_VM_OP_LOAD_CONST:
+        {
+          (void)snprintf(instr, sizeof(instr), "%s r%u, const_%d", s_op_name(op), (unsigned)ins.a, (int)ins.imm);
+
+          if (ins.imm >= 0 && (size_t)ins.imm < chunk->const_count)
+          {
+            /* comment: const_N <value> */
+            char vbuf[96];
+            vbuf[0] = '\0';
+            /* Print value inline into a buffer by using the same printer via a temp FILE? Not available.
+               Keep consistent with previous file: comment shows const_N and value is printed by LOAD_CONST itself only.
+               So here we keep the value out; LOAD_CONST already shows const_N. */
+            (void)vbuf;
+            (void)snprintf(comment, sizeof(comment), "const_%d", (int)ins.imm);
+          }
+          else
+          {
+            (void)snprintf(comment, sizeof(comment), "<oob>");
+          }
+        } break;
+
+      case MI_VM_OP_LOAD_BLOCK:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, %d", s_op_name(op), (unsigned)ins.a, (int)ins.imm);
+        (void)snprintf(comment, sizeof(comment), "subchunk[%d]", (int)ins.imm);
+        break;
+
+      case MI_VM_OP_MOV:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, r%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b);
+        break;
+
+      case MI_VM_OP_NEG:
+      case MI_VM_OP_NOT:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, r%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b);
+        break;
+
+      case MI_VM_OP_ADD:
+      case MI_VM_OP_SUB:
+      case MI_VM_OP_MUL:
+      case MI_VM_OP_DIV:
+      case MI_VM_OP_MOD:
+      case MI_VM_OP_EQ:
+      case MI_VM_OP_NEQ:
+      case MI_VM_OP_LT:
+      case MI_VM_OP_LTEQ:
+      case MI_VM_OP_GT:
+      case MI_VM_OP_GTEQ:
+      case MI_VM_OP_AND:
+      case MI_VM_OP_OR:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, r%u, r%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, (unsigned)ins.c);
+        break;
+
+      case MI_VM_OP_LOAD_VAR:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, %d", s_op_name(op), (unsigned)ins.a, (int)ins.imm);
+        if (ins.imm >= 0 && (size_t)ins.imm < chunk->symbol_count)
+        {
+          XSlice s = chunk->symbols[(size_t)ins.imm];
+          (void)snprintf(comment, sizeof(comment), "sym_%d %.*s", (int)ins.imm, (int)s.length, s.ptr);
+        }
+        else
+        {
+          (void)snprintf(comment, sizeof(comment), "<oob>");
+        }
+        break;
+
+      case MI_VM_OP_STORE_VAR:
+        (void)snprintf(instr, sizeof(instr), "%s %d, r%u", s_op_name(op), (int)ins.imm, (unsigned)ins.a);
+        if (ins.imm >= 0 && (size_t)ins.imm < chunk->symbol_count)
+        {
+          XSlice s = chunk->symbols[(size_t)ins.imm];
+          (void)snprintf(comment, sizeof(comment), "sym_%d %.*s", (int)ins.imm, (int)s.length, s.ptr);
+        }
+        else
+        {
+          (void)snprintf(comment, sizeof(comment), "<oob>");
+        }
+        break;
+
+      case MI_VM_OP_LOAD_INDIRECT_VAR:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, r%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b);
+        break;
+
+      case MI_VM_OP_ARG_CLEAR:
+        (void)snprintf(instr, sizeof(instr), "%s", s_op_name(op));
+        break;
+
+      case MI_VM_OP_ARG_PUSH:
+        (void)snprintf(instr, sizeof(instr), "%s r%u", s_op_name(op), (unsigned)ins.a);
+        break;
+
+      case MI_VM_OP_ARG_PUSH_CONST:
+        {
+          /* IMPORTANT: keep previous behavior: print inline value, comment is const_N */
+          char vbuf[96];
+          vbuf[0] = '\0';
+
+          (void)snprintf(instr, sizeof(instr), "%s ", s_op_name(op));
+
+          /* We'll append the value into instr by printing into a temp buffer via value-to-string helper if available.
+             If not available in this translation unit, fall back to printing directly like before by using s_vm_print_value_inline
+             and then padding. Here we do the safe route: keep instr as "ARG_PUSH_CONST" and print value inline separately. */
+          if (ins.imm >= 0 && (size_t)ins.imm < chunk->const_count)
+          {
+            /* Print "ARG_PUSH_CONST " now, then inline value, then pad+comment. */
+            /* We'll handle this as a special case after switch. */
+            (void)snprintf(comment, sizeof(comment), "const_%d", (int)ins.imm);
+            (void)snprintf(vbuf, sizeof(vbuf), "%d", 0);
+          }
+          else
+          {
+            (void)snprintf(comment, sizeof(comment), "<oob>");
+          }
+
+          /* Mark as special by storing op name in instr and using comment; actual value printed later. */
+        } break;
+
+      case MI_VM_OP_ARG_PUSH_SYM:
+        (void)snprintf(instr, sizeof(instr), "%s %d", s_op_name(op), (int)ins.imm);
+        if (ins.imm >= 0 && (size_t)ins.imm < chunk->symbol_count)
+        {
+          XSlice s = chunk->symbols[(size_t)ins.imm];
+          (void)snprintf(comment, sizeof(comment), "sym_%d %.*s", (int)ins.imm, (int)s.length, s.ptr);
+        }
+        else
+        {
+          (void)snprintf(comment, sizeof(comment), "<oob>");
+        }
+        break;
+
+      case MI_VM_OP_ARG_PUSH_VAR_SYM:
+        (void)snprintf(instr, sizeof(instr), "%s %d", s_op_name(op), (int)ins.imm);
+        if (ins.imm >= 0 && (size_t)ins.imm < chunk->symbol_count)
+        {
+          XSlice s = chunk->symbols[(size_t)ins.imm];
+          (void)snprintf(comment, sizeof(comment), "sym_%d %.*s", (int)ins.imm, (int)s.length, s.ptr);
+        }
+        else
+        {
+          (void)snprintf(comment, sizeof(comment), "<oob>");
+        }
+        break;
+
+      case MI_VM_OP_CALL_CMD:
+        {
+          const char* name = "cmd";
+          int name_len = 3;
+          if (chunk->cmd_names && ins.imm >= 0 && (size_t)ins.imm < chunk->cmd_count)
+          {
+            XSlice s = chunk->cmd_names[(size_t)ins.imm];
+            name = s.ptr;
+            name_len = (int)s.length;
+          }
+          (void)snprintf(instr, sizeof(instr), "%s r%u, %u, %.*s", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, name_len, name);
+          (void)snprintf(comment, sizeof(comment), "cmd_%d", (int)ins.imm);
+        } break;
+
+      case MI_VM_OP_CALL_CMD_DYN:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, r%u, %u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, (unsigned)ins.c);
+        break;
+
+      case MI_VM_OP_CALL_BLOCK:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, r%u, argc=%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, (unsigned)ins.c);
+        break;
+
+      case MI_VM_OP_JUMP:
+        (void)snprintf(instr, sizeof(instr), "%s %d", s_op_name(op), (int)ins.imm);
+        break;
+
+      case MI_VM_OP_JUMP_IF_TRUE:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, %d", s_op_name(op), (unsigned)ins.a, (int)ins.imm);
+        break;
+
+      case MI_VM_OP_JUMP_IF_FALSE:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, %d", s_op_name(op), (unsigned)ins.a, (int)ins.imm);
+        break;
+
+      case MI_VM_OP_RETURN:
+        (void)snprintf(instr, sizeof(instr), "%s r%u", s_op_name(op), (unsigned)ins.a);
+        break;
+
+      case MI_VM_OP_HALT:
+        (void)snprintf(instr, sizeof(instr), "%s r%u", s_op_name(op), (unsigned)ins.a);
+        (void)snprintf(comment, sizeof(comment), "");
+        break;
+
+      default:
+        (void)snprintf(instr, sizeof(instr), "%s a=%u b=%u c=%u imm=%d", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, (unsigned)ins.c, (int)ins.imm);
+        break;
+    }
+
+    /* Special-case: ARG_PUSH_CONST must print value inline, not an index. */
+    if (op == MI_VM_OP_ARG_PUSH_CONST)
+    {
+      /* Print "ARG_PUSH_CONST <value>" into a fixed field, then comment */
+      char tmp[96];
+      tmp[0] = '\0';
+
+      if (ins.imm >= 0 && (size_t)ins.imm < chunk->const_count)
+      {
+        /* print into stdout via s_vm_print_value_inline but keep alignment:
+           we print into a temp string using existing s_vm_value_to_string if available. */
+        char vbuf[64];
+        vbuf[0] = '\0';
+        s_vm_value_to_string(vbuf, sizeof(vbuf), &chunk->consts[(size_t)ins.imm]);
+        (void)snprintf(instr, sizeof(instr), "%s %s", s_op_name(op), vbuf);
+        (void)snprintf(comment, sizeof(comment), "const_%d", (int)ins.imm);
+      }
+      else
+      {
+        (void)snprintf(instr, sizeof(instr), "%s <oob>", s_op_name(op));
+        (void)snprintf(comment, sizeof(comment), "<oob>");
+      }
+
+      (void)tmp;
+    }
+
+    /* Print with fixed comment column */
+    printf("%-32s", instr);
+    if (comment[0] || op == MI_VM_OP_HALT)
+    {
+      printf("  #  %s", comment);
+    }
+    printf("\n");
   }
+
+  if (chunk->subchunk_count)
+  {
+    for (size_t i = 0; i < chunk->subchunk_count; ++i)
+    {
+      printf("\n=== SUBCHUNK %zu ===\n", i);
+      mi_vm_disasm(chunk->subchunks[i]);
+    }
+  }
+
+  printf("\n");
 }
