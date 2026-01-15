@@ -601,6 +601,60 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
     return dst;
   }
 
+  /* Special form: while
+     Grammar (command args):
+       while :: <cond> <body_block>
+     Compiles to:
+       loop_start:
+         <cond>
+         JF cond, loop_end
+         CALL_BLOCK body
+         JMP loop_start
+       loop_end:
+  */
+  if (s_expr_is_lit_string(e->as.command.head, "while"))
+  {
+    const MiExprList* it = e->as.command.args;
+    const MiExpr* cond = it ? it->expr : NULL;
+    it = it ? it->next : NULL;
+    const MiExpr* body_block = it ? it->expr : NULL;
+
+    if (!cond || !body_block)
+    {
+      mi_error("while: expected cond and body block\n");
+      int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      return dst;
+    }
+
+    size_t loop_start = b->chunk->code_count;
+
+    uint8_t cond_reg = s_compile_expr(b, cond);
+
+    /* JF cond, <to loop end> */
+    size_t jf_index = b->chunk->code_count;
+    s_chunk_emit(b->chunk, MI_VM_OP_JUMP_IF_FALSE, cond_reg, 0, 0, 0);
+
+    uint8_t block_reg = s_compile_expr(b, body_block);
+    s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+
+    /* JMP back to loop_start */
+    size_t jmp_index = b->chunk->code_count;
+    s_chunk_emit(b->chunk, MI_VM_OP_JUMP, 0, 0, 0, 0);
+    {
+      int32_t rel_back = (int32_t)((int64_t)loop_start - (int64_t)(jmp_index + 1u));
+      s_chunk_patch_imm(b->chunk, jmp_index, rel_back);
+    }
+
+    /* Patch JF to jump here (loop end). */
+    {
+      int32_t rel_end = (int32_t)((int64_t)b->chunk->code_count - (int64_t)(jf_index + 1u));
+      s_chunk_patch_imm(b->chunk, jf_index, rel_end);
+    }
+
+    return dst;
+  }
+
   const MiExprList* it = e->as.command.args;
   while (it)
   {
