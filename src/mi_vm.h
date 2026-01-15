@@ -68,6 +68,9 @@ typedef enum MiVmOp
   MI_VM_OP_CALL_CMD_DYN,      // a = call by name in regs[b], argc=c
 
   MI_VM_OP_CALL_BLOCK,        // a = call regs[b] (block) with argc=c
+  // Scopes (VM-only; used by compiler for inlined control flow)
+  MI_VM_OP_SCOPE_PUSH,        // push a new scope frame (parent = current)
+  MI_VM_OP_SCOPE_POP,         // pop current scope frame
   // Control
   MI_VM_OP_JUMP,
   MI_VM_OP_JUMP_IF_TRUE,

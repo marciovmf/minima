@@ -412,6 +412,21 @@ typedef struct MiVmBuild
   MiVm*       vm;
   MiVmChunk*  chunk;
   uint8_t     next_reg;
+
+  /* Loop context stack (compiler-only). Needed for break/continue. */
+  int         loop_depth;
+  struct
+  {
+    size_t  loop_start_ip;
+    size_t  break_jumps[64];
+    size_t  break_jump_count;
+    int     scope_base_depth; // inline_scope_depth value outside this loop
+  } loops[16];
+
+  /* Tracks active inlined scope depth for proper cleanup on `return`.
+     This only tracks scopes created by MI_VM_OP_SCOPE_PUSH/POP emitted
+     by the compiler (e.g. inlined while bodies). */
+  int         inline_scope_depth;
 } MiVmBuild;
 
 static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e);
@@ -475,6 +490,90 @@ static bool s_expr_is_lit_string(const MiExpr* e, const char* cstr)
   return s_slice_eq(e->as.string_lit.value, x_slice_from_cstr(cstr));
 }
 
+static void s_emit_scope_pops(MiVmBuild* b, int count)
+{
+  if (!b)
+  {
+    return;
+  }
+
+  for (int i = 0; i < count; ++i)
+  {
+    s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_POP, 0, 0, 0, 0);
+  }
+}
+
+static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e);
+
+static void s_compile_script_inline(MiVmBuild* b, const MiScript* script)
+{
+  if (!b || !script)
+  {
+    return;
+  }
+
+  const MiCommandList* it = script->first;
+  while (it)
+  {
+    const MiCommand* cmd = it->command;
+    b->next_reg = 0;
+
+    MiExpr fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.kind = MI_EXPR_COMMAND;
+    fake.as.command.head = cmd ? cmd->head : NULL;
+    fake.as.command.args = cmd ? cmd->args : NULL;
+    fake.as.command.argc = cmd ? (unsigned int) cmd->argc : 0;
+
+    (void) s_compile_command_expr(b, &fake);
+    it = it->next;
+  }
+}
+
+static void s_compile_script_inline_to_reg(MiVmBuild* b, const MiScript* script, uint8_t dst)
+{
+  if (!b || !script)
+  {
+    int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+    s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+    return;
+  }
+
+  uint8_t last = dst;
+  bool have_last = false;
+
+  const MiCommandList* it = script->first;
+  while (it)
+  {
+    const MiCommand* cmd = it->command;
+    b->next_reg = 0;
+
+    MiExpr fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.kind = MI_EXPR_COMMAND;
+    fake.as.command.head = cmd ? cmd->head : NULL;
+    fake.as.command.args = cmd ? cmd->args : NULL;
+    fake.as.command.argc = cmd ? (unsigned int)cmd->argc : 0;
+
+    last = s_compile_command_expr(b, &fake);
+    have_last = true;
+
+    it = it->next;
+  }
+
+  if (!have_last)
+  {
+    int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+    s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+    return;
+  }
+
+  if (last != dst)
+  {
+    s_chunk_emit(b->chunk, MI_VM_OP_MOV, dst, last, 0, 0);
+  }
+}
+
 static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
 {
   uint8_t dst = s_alloc_reg(b);
@@ -494,6 +593,108 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
     const MiExprList* only = e->as.command.args;
     uint8_t block_reg = s_compile_expr(b, only ? only->expr : NULL);
     s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+    return dst;
+  }
+
+  /* Special form: break ::
+     Only valid inside a VM-compiled loop that supports break/continue.
+     Emits an unconditional jump to the loop end, plus any required
+     scope cleanup. */
+  if (s_expr_is_lit_string(e->as.command.head, "break"))
+  {
+    if (b->loop_depth <= 0)
+    {
+      mi_error("break: not inside a loop\n");
+      int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      return dst;
+    }
+
+    MiRtValue v = mi_rt_make_void();
+    s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, s_chunk_add_const(b->chunk, v));
+
+    int idx = b->loop_depth - 1;
+
+    /* Pop all compiler-emitted inlined scopes down to the loop's base depth.
+       This correctly handles break/continue from inside nested inlined blocks
+       (e.g. an `if` body inside a `while` body). */
+    {
+      int pops = b->inline_scope_depth - b->loops[idx].scope_base_depth;
+      if (pops > 0)
+      {
+        s_emit_scope_pops(b, pops);
+      }
+    }
+
+    if (b->loops[idx].break_jump_count < (sizeof(b->loops[idx].break_jumps) / sizeof(b->loops[idx].break_jumps[0])))
+    {
+      b->loops[idx].break_jumps[b->loops[idx].break_jump_count++] = b->chunk->code_count;
+    }
+    s_chunk_emit(b->chunk, MI_VM_OP_JUMP, 0, 0, 0, 0);
+    return dst;
+  }
+
+  /* Special form: continue ::
+     Jumps to loop start, plus any required scope cleanup. */
+  if (s_expr_is_lit_string(e->as.command.head, "continue"))
+  {
+    if (b->loop_depth <= 0)
+    {
+      mi_error("continue: not inside a loop\n");
+      int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      return dst;
+    }
+
+    MiRtValue v = mi_rt_make_void();
+    s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, s_chunk_add_const(b->chunk, v));
+
+    int idx = b->loop_depth - 1;
+
+    {
+      int pops = b->inline_scope_depth - b->loops[idx].scope_base_depth;
+      if (pops > 0)
+      {
+        s_emit_scope_pops(b, pops);
+      }
+    }
+
+    size_t jmp_index = b->chunk->code_count;
+    s_chunk_emit(b->chunk, MI_VM_OP_JUMP, 0, 0, 0, 0);
+    {
+      int32_t rel = (int32_t)((int64_t)b->loops[idx].loop_start_ip - (int64_t)(jmp_index + 1u));
+      s_chunk_patch_imm(b->chunk, jmp_index, rel);
+    }
+    return dst;
+  }
+
+  /* Special form: return :: <expr>?
+     Returns from the current chunk early. This is mainly useful inside
+     blocks called via CALL_BLOCK, but also works at top level.
+     Any compiler-emitted inlined scopes are cleaned up first. */
+  if (s_expr_is_lit_string(e->as.command.head, "return"))
+  {
+    const MiExprList* it = e->as.command.args;
+    const MiExpr* value = it ? it->expr : NULL;
+    uint8_t r = 0;
+
+    if (value)
+    {
+      r = s_compile_expr(b, value);
+    }
+    else
+    {
+      int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      r = dst;
+    }
+
+    if (b->inline_scope_depth > 0)
+    {
+      s_emit_scope_pops(b, b->inline_scope_depth);
+    }
+
+    s_chunk_emit(b->chunk, MI_VM_OP_RETURN, r, 0, 0, 0);
     return dst;
   }
 
@@ -530,8 +731,19 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
       size_t jf_index = b->chunk->code_count;
       s_chunk_emit(b->chunk, MI_VM_OP_JUMP_IF_FALSE, cond_reg, 0, 0, 0);
 
-      uint8_t block_reg = s_compile_expr(b, then_block);
-      s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+      if (then_block->kind == MI_EXPR_BLOCK && then_block->as.block.script)
+      {
+        s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_PUSH, 0, 0, 0, 0);
+        b->inline_scope_depth += 1;
+        s_compile_script_inline_to_reg(b, then_block->as.block.script, dst);
+        s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_POP, 0, 0, 0, 0);
+        b->inline_scope_depth -= 1;
+      }
+      else
+      {
+        uint8_t block_reg = s_compile_expr(b, then_block);
+        s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+      }
 
       /* JMP <to end> */
       if (end_jump_count < (sizeof(end_jumps) / sizeof(end_jumps[0])))
@@ -579,9 +791,19 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
           break;
         }
 
-        //uint8_t block_reg = s_compile_expr(b, else_block);
-        block_reg = s_compile_expr(b, else_block);
-        s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+        if (else_block->kind == MI_EXPR_BLOCK && else_block->as.block.script)
+        {
+          s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_PUSH, 0, 0, 0, 0);
+          b->inline_scope_depth += 1;
+          s_compile_script_inline_to_reg(b, else_block->as.block.script, dst);
+          s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_POP, 0, 0, 0, 0);
+          b->inline_scope_depth -= 1;
+        }
+        else
+        {
+          uint8_t block_reg = s_compile_expr(b, else_block);
+          s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+        }
         break;
       }
 
@@ -627,6 +849,14 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
       return dst;
     }
 
+    if (body_block->kind != MI_EXPR_BLOCK || !body_block->as.block.script)
+    {
+      mi_error("while: body must be a literal block\n");
+      int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      return dst;
+    }
+
     size_t loop_start = b->chunk->code_count;
 
     uint8_t cond_reg = s_compile_expr(b, cond);
@@ -635,8 +865,31 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
     size_t jf_index = b->chunk->code_count;
     s_chunk_emit(b->chunk, MI_VM_OP_JUMP_IF_FALSE, cond_reg, 0, 0, 0);
 
-    uint8_t block_reg = s_compile_expr(b, body_block);
-    s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+    /* Inline the block body so break/continue can be compiled to jumps.
+       We still preserve block semantics by creating a fresh scope per
+       iteration (variables created inside the body do not leak). */
+    int loop_scope_base = b->inline_scope_depth;
+    s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_PUSH, 0, 0, 0, 0);
+    b->inline_scope_depth += 1;
+
+    int loop_idx = -1;
+    if (b->loop_depth < (int)(sizeof(b->loops) / sizeof(b->loops[0])))
+    {
+      loop_idx = b->loop_depth;
+      b->loop_depth += 1;
+      b->loops[loop_idx].loop_start_ip = loop_start;
+      b->loops[loop_idx].break_jump_count = 0;
+      b->loops[loop_idx].scope_base_depth = loop_scope_base;
+    }
+    else
+    {
+      mi_error("while: loop nesting too deep\n");
+    }
+
+    s_compile_script_inline(b, body_block->as.block.script);
+
+    s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_POP, 0, 0, 0, 0);
+    b->inline_scope_depth -= 1;
 
     /* JMP back to loop_start */
     size_t jmp_index = b->chunk->code_count;
@@ -646,10 +899,25 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
       s_chunk_patch_imm(b->chunk, jmp_index, rel_back);
     }
 
-    /* Patch JF to jump here (loop end). */
+    /* loop_end label is here */
+    size_t loop_end = b->chunk->code_count;
+
+    /* Patch JF to jump to loop_end */
     {
-      int32_t rel_end = (int32_t)((int64_t)b->chunk->code_count - (int64_t)(jf_index + 1u));
+      int32_t rel_end = (int32_t)((int64_t)loop_end - (int64_t)(jf_index + 1u));
       s_chunk_patch_imm(b->chunk, jf_index, rel_end);
+    }
+
+    /* Patch break jumps to loop_end */
+    if (loop_idx >= 0)
+    {
+      for (size_t bi = 0; bi < b->loops[loop_idx].break_jump_count; ++bi)
+      {
+        size_t bj = b->loops[loop_idx].break_jumps[bi];
+        int32_t rel = (int32_t)((int64_t)loop_end - (int64_t)(bj + 1u));
+        s_chunk_patch_imm(b->chunk, bj, rel);
+      }
+      b->loop_depth -= 1;
     }
 
     return dst;
@@ -1284,6 +1552,16 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           last = ret;
         } break;
 
+      case MI_VM_OP_SCOPE_PUSH:
+        {
+          mi_rt_scope_push(vm->rt);
+        } break;
+
+      case MI_VM_OP_SCOPE_POP:
+        {
+          mi_rt_scope_pop(vm->rt);
+        } break;
+
       case MI_VM_OP_JUMP:
         {
           int64_t npc = (int64_t)pc + (int64_t)ins.imm;
@@ -1383,6 +1661,8 @@ static const char* s_op_name(MiVmOp op)
     case MI_VM_OP_CALL_CMD:           return "CALL";
     case MI_VM_OP_CALL_CMD_DYN:       return "DCALL";
     case MI_VM_OP_CALL_BLOCK:         return "BCALL";
+    case MI_VM_OP_SCOPE_PUSH:         return "SPUSH";
+    case MI_VM_OP_SCOPE_POP:          return "SPOP";
     case MI_VM_OP_JUMP:               return "JMP";
     case MI_VM_OP_JUMP_IF_TRUE:       return "JT";
     case MI_VM_OP_JUMP_IF_FALSE:      return "JF";
@@ -1645,6 +1925,11 @@ void mi_vm_disasm(const MiVmChunk* chunk)
 
       case MI_VM_OP_CALL_BLOCK:
         (void)snprintf(instr, sizeof(instr), "%s r%u, r%u, argc=%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, (unsigned)ins.c);
+        break;
+
+      case MI_VM_OP_SCOPE_PUSH:
+      case MI_VM_OP_SCOPE_POP:
+        (void)snprintf(instr, sizeof(instr), "%s", s_op_name(op));
         break;
 
       case MI_VM_OP_JUMP:
