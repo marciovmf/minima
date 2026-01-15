@@ -12,6 +12,9 @@
 #include "mi_parse.h"
 #include "mi_runtime.h"
 
+#define MI_VM_REG_COUNT 32
+#define MI_VM_ARG_STACK_COUNT 256
+
 //----------------------------------------------------------
 // Minima VM
 //----------------------------------------------------------
@@ -115,8 +118,8 @@ struct MiVm
   size_t            command_capacity;
 
   // Working state (execution).
-  MiRtValue regs[256];
-  MiRtValue arg_stack[256];
+  MiRtValue regs[MI_VM_REG_COUNT];
+  MiRtValue arg_stack[MI_VM_ARG_STACK_COUNT];
   int       arg_top;
 };
 

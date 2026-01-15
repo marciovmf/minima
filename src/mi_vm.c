@@ -47,10 +47,11 @@ static bool s_slice_eq(const XSlice a, const XSlice b)
  * Once the instruction set stabilizes, maybe I'll switch to stdx_hashtable.
  */
 
-#if 1
 //----------------------------------------------------------
 // VM builtins (minimal starter set)
 //----------------------------------------------------------
+
+static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value);
 
 static void s_vm_print_value_inline(const MiRtValue* v)
 {
@@ -136,8 +137,6 @@ static MiRtValue s_vm_cmd_set(MiVm* vm, int argc, const MiRtValue* argv)
   return argv[1];
 }
 
-static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value);
-
 static MiRtValue s_vm_cmd_call(MiVm* vm, int argc, const MiRtValue* argv)
 {
   if (argc != 1)
@@ -149,9 +148,6 @@ static MiRtValue s_vm_cmd_call(MiVm* vm, int argc, const MiRtValue* argv)
   return s_vm_exec_block_value(vm, argv[0]);
 }
 
-
-#endif
-
 static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value)
 {
   if (!vm || !vm->rt)
@@ -161,36 +157,44 @@ static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value)
 
   if (block_value.kind != MI_RT_VAL_BLOCK || !block_value.as.block)
   {
-    mi_error("call: expected block\n");
+    mi_error("call: expected block");
     return mi_rt_make_void();
   }
 
   MiRtBlock* b = block_value.as.block;
   if (b->kind != MI_RT_BLOCK_VM_CHUNK || !b->ptr)
   {
-    mi_error("call: expected VM block\n");
+    mi_error("call: expected VM block");
     return mi_rt_make_void();
   }
 
   MiVmChunk* sub = (MiVmChunk*)b->ptr;
   MiScopeFrame* parent = b->env ? b->env : vm->rt->current;
 
-  MiRtValue saved_regs[256];
-  MiRtValue saved_args[256];
-  int saved_arg_top = vm->arg_top;
-  memcpy(saved_regs, vm->regs, sizeof(saved_regs));
-  memcpy(saved_args, vm->arg_stack, sizeof(saved_args));
+  /* CALL ABI:
+     - r0 is return value
+     - r1-r7 are VM-reserved and preserved across calls
+     - r8+ are caller-saved (clobbered)
+     - arg stack is not preserved across calls */
+  MiRtValue saved_vm_regs[7];
+  for (int i = 0; i < 7; ++i)
+  {
+    saved_vm_regs[i] = vm->regs[1 + i];
+  }
 
   mi_rt_scope_push_with_parent(vm->rt, parent);
   MiRtValue ret = mi_vm_execute(vm, sub);
   mi_rt_scope_pop(vm->rt);
 
-  memcpy(vm->regs, saved_regs, sizeof(saved_regs));
-  memcpy(vm->arg_stack, saved_args, sizeof(saved_args));
-  vm->arg_top = saved_arg_top;
+  for (int i = 0; i < 7; ++i)
+  {
+    vm->regs[1 + i] = saved_vm_regs[i];
+  }
+  vm->arg_top = 0;
 
   return ret;
 }
+
 
 //----------------------------------------------------------
 // VM init/shutdown
@@ -985,7 +989,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
       case MI_VM_OP_ARG_PUSH:
         {
-          if (vm->arg_top >= 256)
+          if (vm->arg_top >= MI_VM_ARG_STACK_COUNT)
           {
             mi_error("mi_vm: arg stack overflow\n");
             break;
@@ -995,7 +999,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
       case MI_VM_OP_ARG_PUSH_CONST:
         {
-          if (vm->arg_top >= 256)
+          if (vm->arg_top >= MI_VM_ARG_STACK_COUNT)
           {
             mi_error("mi_vm: arg stack overflow\n");
             break;
@@ -1011,7 +1015,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
       case MI_VM_OP_ARG_PUSH_VAR_SYM:
         {
-          if (vm->arg_top >= 256)
+          if (vm->arg_top >= MI_VM_ARG_STACK_COUNT)
           {
             mi_error("mi_vm: arg stack overflow\n");
             break;
@@ -1042,7 +1046,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             break;
           }
 
-          MiRtValue argv[256];
+          MiRtValue argv[MI_VM_ARG_STACK_COUNT];
           for (int i = argc - 1; i >= 0; --i)
           {
             argv[i] = vm->arg_stack[--vm->arg_top];
@@ -1078,7 +1082,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             break;
           }
 
-          MiRtValue argv[256];
+          MiRtValue argv[MI_VM_ARG_STACK_COUNT];
           for (int i = argc - 1; i >= 0; --i)
           {
             argv[i] = vm->arg_stack[--vm->arg_top];
