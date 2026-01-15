@@ -456,6 +456,25 @@ static MiVmOp s_map_binary(MiTokenKind op)
   }
 }
 
+static void s_chunk_patch_imm(MiVmChunk* c, size_t ins_index, int32_t imm)
+{
+  if (!c || ins_index >= c->code_count)
+  {
+    return;
+  }
+  c->code[ins_index].imm = imm;
+}
+
+static bool s_expr_is_lit_string(const MiExpr* e, const char* cstr)
+{
+  if (!e || e->kind != MI_EXPR_STRING_LITERAL)
+  {
+    return false;
+  }
+
+  return s_slice_eq(e->as.string_lit.value, x_slice_from_cstr(cstr));
+}
+
 static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
 {
   uint8_t dst = s_alloc_reg(b);
@@ -475,6 +494,110 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
     const MiExprList* only = e->as.command.args;
     uint8_t block_reg = s_compile_expr(b, only ? only->expr : NULL);
     s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+    return dst;
+  }
+
+  /* Special form: if/elseif/else
+     Grammar (command args):
+       if :: <cond> <then_block> ("elseif" <cond> <block>)* ("else" <block>)?
+     Note: "elseif"/"else" are plain string literal tokens in the AST. */
+  if (s_expr_is_lit_string(e->as.command.head, "if"))
+  {
+    const MiExprList* it = e->as.command.args;
+
+    const MiExpr* cond = it ? it->expr : NULL;
+    it = it ? it->next : NULL;
+    const MiExpr* then_block = it ? it->expr : NULL;
+    it = it ? it->next : NULL;
+
+    if (!cond || !then_block)
+    {
+      mi_error("if: expected cond and then block\n");
+      int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      return dst;
+    }
+
+    /* We'll patch all jumps to the end once we know where it is. */
+    size_t end_jumps[64];
+    size_t end_jump_count = 0;
+
+    for (;;)
+    {
+      uint8_t cond_reg = s_compile_expr(b, cond);
+
+      /* JF cond, <to next branch> */
+      size_t jf_index = b->chunk->code_count;
+      s_chunk_emit(b->chunk, MI_VM_OP_JUMP_IF_FALSE, cond_reg, 0, 0, 0);
+
+      uint8_t block_reg = s_compile_expr(b, then_block);
+      s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+
+      /* JMP <to end> */
+      if (end_jump_count < (sizeof(end_jumps) / sizeof(end_jumps[0])))
+      {
+        end_jumps[end_jump_count++] = b->chunk->code_count;
+      }
+      s_chunk_emit(b->chunk, MI_VM_OP_JUMP, 0, 0, 0, 0);
+
+      /* Patch JF to jump here (start of the next branch parsing/emit). */
+      {
+        int32_t rel = (int32_t)((int64_t)b->chunk->code_count - (int64_t)(jf_index + 1u));
+        s_chunk_patch_imm(b->chunk, jf_index, rel);
+      }
+
+      /* No more tokens: done. */
+      if (!it)
+      {
+        break;
+      }
+
+      /* elseif / else markers */
+      if (s_expr_is_lit_string(it->expr, "elseif"))
+      {
+        it = it->next;
+        cond = it ? it->expr : NULL;
+        it = it ? it->next : NULL;
+        then_block = it ? it->expr : NULL;
+        it = it ? it->next : NULL;
+        if (!cond || !then_block)
+        {
+          mi_error("if: elseif expects cond and block\n");
+          break;
+        }
+        continue;
+      }
+
+      if (s_expr_is_lit_string(it->expr, "else"))
+      {
+        it = it->next;
+        const MiExpr* else_block = it ? it->expr : NULL;
+        it = it ? it->next : NULL;
+        if (!else_block)
+        {
+          mi_error("if: else expects block\n");
+          break;
+        }
+
+        //uint8_t block_reg = s_compile_expr(b, else_block);
+        block_reg = s_compile_expr(b, else_block);
+        s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+        break;
+      }
+
+      /* Unexpected trailing tokens, ignore. */
+      mi_error("if: unexpected tokens after then block\n");
+      break;
+    }
+
+    /* Patch all end jumps to jump here (end label). */
+    for (size_t i = 0; i < end_jump_count; ++i)
+    {
+      size_t jmp_index = end_jumps[i];
+      int32_t rel = (int32_t)((int64_t)b->chunk->code_count - (int64_t)(jmp_index + 1u));
+      s_chunk_patch_imm(b->chunk, jmp_index, rel);
+    }
+
     return dst;
   }
 
@@ -1106,6 +1229,55 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           vm->regs[ins.a] = ret;
           last = ret;
         } break;
+
+      case MI_VM_OP_JUMP:
+        {
+          int64_t npc = (int64_t)pc + (int64_t)ins.imm;
+          if (npc < 0 || npc > (int64_t)chunk->code_count)
+          {
+            mi_error("mi_vm: JUMP out of range\n");
+            return last;
+          }
+          pc = (size_t)npc;
+        } break;
+
+      case MI_VM_OP_JUMP_IF_TRUE:
+      case MI_VM_OP_JUMP_IF_FALSE:
+        {
+          MiRtValue c = vm->regs[ins.a];
+          bool is_true = false;
+          if (c.kind == MI_RT_VAL_BOOL)
+          {
+            is_true = c.as.b;
+          }
+          else if (c.kind == MI_RT_VAL_INT)
+          {
+            is_true = (c.as.i != 0);
+          }
+          else if (c.kind == MI_RT_VAL_FLOAT)
+          {
+            is_true = (c.as.f != 0.0f);
+          }
+          else if (c.kind == MI_RT_VAL_STRING)
+          {
+            is_true = (c.as.s.length != 0);
+          }
+
+          bool take = ((MiVmOp)ins.op == MI_VM_OP_JUMP_IF_TRUE) ? is_true : !is_true;
+          if (take)
+          {
+            int64_t npc = (int64_t)pc + (int64_t)ins.imm;
+            if (npc < 0 || npc > (int64_t)chunk->code_count)
+            {
+              mi_error("mi_vm: JUMP_IF out of range\n");
+              return last;
+            }
+            pc = (size_t)npc;
+          }
+        } break;
+
+      case MI_VM_OP_RETURN:
+        return vm->regs[ins.a];
 
       case MI_VM_OP_HALT:
         return last;
