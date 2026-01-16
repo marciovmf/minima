@@ -37,6 +37,13 @@ typedef enum MiVmOp
   MI_VM_OP_LOAD_CONST,  // a = const[imm]
   MI_VM_OP_LOAD_BLOCK,  // a = new block from subchunk[imm] (captures env)
   MI_VM_OP_MOV,         // a = b
+  // Lists
+  MI_VM_OP_LIST_NEW,    // a = new list
+  MI_VM_OP_LIST_PUSH,   // regs[a].list push regs[b]
+  // Indexing
+  MI_VM_OP_INDEX,       // a = regs[b][regs[c]]
+  MI_VM_OP_STORE_INDEX, // regs[a][regs[b]] = regs[c]
+  MI_VM_OP_LEN,         // a = len(regs[b])
                         // Unary
   MI_VM_OP_NEG,
   MI_VM_OP_NOT,

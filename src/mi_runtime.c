@@ -61,6 +61,51 @@ static MiRtVar* s_var_find_in_frame(const MiScopeFrame* frame, XSlice name)
   return NULL;
 }
 
+static void* s_value_payload_ptr(MiRtValue v)
+{
+  switch (v.kind)
+  {
+    case MI_RT_VAL_LIST:  return (void*)v.as.list;
+    case MI_RT_VAL_PAIR:  return (void*)v.as.pair;
+    case MI_RT_VAL_BLOCK: return (void*)v.as.block;
+    default:              return NULL;
+  }
+}
+
+static void s_value_pre_destroy(MiRuntime* rt, MiRtValue v)
+{
+  if (!rt)
+  {
+    return;
+  }
+
+  if (v.kind == MI_RT_VAL_LIST && v.as.list)
+  {
+    MiRtList* list = v.as.list;
+    for (size_t i = 0u; i < list->count; ++i)
+    {
+      mi_rt_value_release(rt, list->items[i]);
+    }
+    if (list->items)
+    {
+      mi_heap_release_payload(&rt->heap, list->items);
+      list->items = NULL;
+      list->count = 0u;
+      list->capacity = 0u;
+    }
+  }
+  else if (v.kind == MI_RT_VAL_PAIR && v.as.pair)
+  {
+    MiRtPair* p = v.as.pair;
+    mi_rt_value_release(rt, p->items[0]);
+    mi_rt_value_release(rt, p->items[1]);
+  }
+  else if (v.kind == MI_RT_VAL_BLOCK && v.as.block)
+  {
+    /* Blocks currently don't own their env/payload memory. */
+  }
+}
+
 //----------------------------------------------------------
 // Public API
 //----------------------------------------------------------
@@ -73,6 +118,12 @@ void mi_rt_init(MiRuntime* rt)
   }
 
   rt->scope_chunk_size = 16u * 1024u;
+
+  if (!mi_heap_init(&rt->heap, 256u * 1024u))
+  {
+    mi_error("mi_runtime: out of memory\n");
+    exit(1);
+  }
 
   rt->root.arena = x_arena_create(64u * 1024u);
   if (!rt->root.arena)
@@ -117,7 +168,19 @@ void mi_rt_shutdown(MiRuntime* rt)
     free(f);
   }
 
+  /* Release values stored in the root frame before destroying the heap. */
+  {
+    MiRtVar* it = rt->root.vars;
+    while (it)
+    {
+      mi_rt_value_release(rt, it->value);
+      it = it->next;
+    }
+  }
+
   x_arena_destroy(rt->root.arena);
+
+  mi_heap_shutdown(&rt->heap);
   rt->root.arena = NULL;
   rt->root.vars = NULL;
   rt->root.parent = NULL;
@@ -139,6 +202,76 @@ void mi_rt_shutdown(MiRuntime* rt)
   rt->command_count = 0u;
   rt->command_capacity = 0u;
   rt->exec_block = NULL;
+}
+
+MiHeapStats mi_rt_heap_stats(const MiRuntime* rt)
+{
+  if (!rt)
+  {
+    MiHeapStats s;
+    memset(&s, 0, sizeof(s));
+    return s;
+  }
+  return mi_heap_stats(&rt->heap);
+}
+
+void mi_rt_value_retain(MiRuntime* rt, MiRtValue v)
+{
+  (void)rt;
+  void* p = s_value_payload_ptr(v);
+  if (p)
+  {
+    mi_heap_retain_payload(p);
+  }
+}
+
+void mi_rt_value_release(MiRuntime* rt, MiRtValue v)
+{
+  if (!rt)
+  {
+    return;
+  }
+
+  void* p = s_value_payload_ptr(v);
+  if (!p)
+  {
+    return;
+  }
+
+  MiObjHeader* hdr = mi_heap_header_from_payload(p);
+  if (!hdr)
+  {
+    return;
+  }
+
+  if (hdr->flags & MI_OBJ_FLAG_FREED)
+  {
+    return;
+  }
+
+  /* If this is the last reference, release children before freeing. */
+  if (hdr->refcount == 1u)
+  {
+    s_value_pre_destroy(rt, v);
+  }
+
+  mi_heap_release_payload(&rt->heap, p);
+}
+
+void mi_rt_value_assign(MiRuntime* rt, MiRtValue* dst, MiRtValue src)
+{
+  if (!dst)
+  {
+    return;
+  }
+
+  if (rt)
+  {
+    mi_rt_value_release(rt, *dst);
+    mi_rt_value_retain(rt, src);
+  }
+
+  *dst = src;
 }
 
 void mi_rt_scope_push(MiRuntime* rt)
@@ -180,6 +313,15 @@ void mi_rt_scope_pop(MiRuntime* rt)
   }
 
   MiScopeFrame* dead = rt->current;
+
+  /* Release all values stored in this frame before the arena is reused. */
+  MiRtVar* it = dead->vars;
+  while (it)
+  {
+    mi_rt_value_release(rt, it->value);
+    it = it->next;
+  }
+
   rt->current = dead->parent;
 
   dead->next_free = rt->free_frames;
@@ -225,7 +367,7 @@ bool mi_rt_var_set(MiRuntime* rt, XSlice name, MiRtValue value)
     MiRtVar* v = s_var_find_in_frame(f, name);
     if (v)
     {
-      v->value = value;
+      mi_rt_value_assign(rt, &v->value, value);
       return true;
     }
     f = f->parent;
@@ -240,7 +382,8 @@ bool mi_rt_var_set(MiRuntime* rt, XSlice name, MiRtValue value)
   }
 
   v->name = name;
-  v->value = value;
+  v->value = mi_rt_make_void();
+  mi_rt_value_assign(rt, &v->value, value);
   v->next = rt->current->vars;
   rt->current->vars = v;
   return true;
@@ -266,14 +409,14 @@ MiRtList* mi_rt_list_create(MiRuntime* rt)
     return NULL;
   }
 
-  MiRtList* list = (MiRtList*)x_arena_alloc(rt->current->arena, sizeof(MiRtList));
+  MiRtList* list = (MiRtList*)mi_heap_alloc_obj(&rt->heap, MI_OBJ_LIST, sizeof(MiRtList));
   if (!list)
   {
     mi_error("mi_runtime: out of memory\n");
     exit(1);
   }
 
-  list->arena = rt->current->arena;
+  list->heap = &rt->heap;
   list->items = NULL;
   list->count = 0u;
   list->capacity = 0u;
@@ -281,11 +424,31 @@ MiRtList* mi_rt_list_create(MiRuntime* rt)
   return list;
 }
 
-MiRtPair* mi_rt_pair_create(void)
+MiRtPair* mi_rt_pair_create(MiRuntime* rt)
 {
-  MiRtPair* p = (MiRtPair*)s_realloc(NULL, sizeof(MiRtPair));
+  if (!rt)
+  {
+    return NULL;
+  }
+
+  MiRtPair* p = (MiRtPair*)mi_heap_alloc_obj(&rt->heap, MI_OBJ_PAIR, sizeof(MiRtPair));
   memset(p, 0, sizeof(MiRtPair));
+  p->items[0] = mi_rt_make_void();
+  p->items[1] = mi_rt_make_void();
   return p;
+}
+
+void mi_rt_pair_set(MiRuntime* rt, MiRtPair* pair, int index, MiRtValue v)
+{
+  if (!rt || !pair)
+  {
+    return;
+  }
+  if (index < 0 || index > 1)
+  {
+    return;
+  }
+  mi_rt_value_assign(rt, &pair->items[index], v);
 }
 
 MiRtBlock* mi_rt_block_create(MiRuntime* rt)
@@ -295,7 +458,7 @@ MiRtBlock* mi_rt_block_create(MiRuntime* rt)
     return NULL;
   }
 
-  MiRtBlock* b = (MiRtBlock*)x_arena_alloc(rt->current->arena, sizeof(MiRtBlock));
+  MiRtBlock* b = (MiRtBlock*)mi_heap_alloc_obj(&rt->heap, MI_OBJ_BLOCK, sizeof(MiRtBlock));
   if (!b)
   {
     mi_error("mi_runtime: out of memory\n");
@@ -319,7 +482,7 @@ bool mi_rt_list_push(MiRtList* list, MiRtValue v)
   if (list->count == list->capacity)
   {
     size_t new_cap = (list->capacity == 0u) ? 8u : (list->capacity * 2u);
-    MiRtValue* new_items = (MiRtValue*)x_arena_alloc(list->arena, new_cap * sizeof(MiRtValue));
+    MiRtValue* new_items = (MiRtValue*)mi_heap_alloc_buffer(list->heap, new_cap * sizeof(MiRtValue));
     if (!new_items)
     {
       return false;
@@ -328,9 +491,22 @@ bool mi_rt_list_push(MiRtList* list, MiRtValue v)
     {
       memcpy(new_items, list->items, list->count * sizeof(MiRtValue));
     }
+
+    if (list->items)
+    {
+      mi_heap_release_payload(list->heap, list->items);
+    }
+
     list->items = new_items;
     list->capacity = new_cap;
   }
+
+  /* The list owns a reference to v (if it is a ref value). */
+  mi_heap_retain_payload(
+      (v.kind == MI_RT_VAL_LIST)  ? (void*)v.as.list :
+      (v.kind == MI_RT_VAL_PAIR)  ? (void*)v.as.pair :
+      (v.kind == MI_RT_VAL_BLOCK) ? (void*)v.as.block :
+      NULL);
 
   list->items[list->count] = v;
   list->count = list->count + 1u;

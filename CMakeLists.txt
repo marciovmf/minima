@@ -26,6 +26,7 @@ list(APPEND SOURCES
   src/mi_parse.c
   src/mi_eval_ast.c
   src/mi_runtime.c
+  src/mi_heap.c
   src/mi_vm.c
   src/main.c)
 

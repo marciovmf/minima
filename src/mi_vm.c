@@ -29,6 +29,20 @@ static void* s_realloc(void* ptr, size_t size)
   return p;
 }
 
+static void s_vm_reg_set(MiVm* vm, uint8_t r, MiRtValue v)
+{
+  mi_rt_value_assign(vm->rt, &vm->regs[r], v);
+}
+
+static void s_vm_arg_clear(MiVm* vm)
+{
+  for (int i = 0; i < vm->arg_top; ++i)
+  {
+    mi_rt_value_assign(vm->rt, &vm->arg_stack[i], mi_rt_make_void());
+  }
+  vm->arg_top = 0;
+}
+
 static bool s_slice_eq(const XSlice a, const XSlice b)
 {
   if (a.length != b.length)
@@ -53,20 +67,58 @@ static bool s_slice_eq(const XSlice a, const XSlice b)
 
 static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value);
 
-static void s_vm_print_value_inline(const MiRtValue* v)
+static void s_vm_print_value_inline_depth(const MiRtValue* v, int depth)
 {
+  if (!v)
+  {
+    printf("<null>");
+    return;
+  }
+
+  if (depth > 8)
+  {
+    printf("...");
+    return;
+  }
+
   switch (v->kind)
   {
     case MI_RT_VAL_VOID:   printf("()"); break;
     case MI_RT_VAL_INT:    printf("%lld", v->as.i); break;
     case MI_RT_VAL_FLOAT:  printf("%g", v->as.f); break;
     case MI_RT_VAL_BOOL:   printf("%s", v->as.b ? "true" : "false"); break;
-    case MI_RT_VAL_STRING: printf("%.*s", (int) v->as.s.length, v->as.s.ptr); break;
-    case MI_RT_VAL_LIST:   printf("[list]"); break;
+    case MI_RT_VAL_STRING: printf("%.*s", (int)v->as.s.length, v->as.s.ptr); break;
     case MI_RT_VAL_BLOCK:  printf("{...}"); break;
     case MI_RT_VAL_PAIR:   printf("<pair>"); break;
-    default:               printf("<unknown>"); break;
+
+    case MI_RT_VAL_LIST:
+    {
+      const MiRtList* list = v->as.list;
+      printf("[");
+      if (list)
+      {
+        for (size_t i = 0u; i < list->count; ++i)
+        {
+          if (i != 0u)
+          {
+            printf(" ");
+          }
+          s_vm_print_value_inline_depth(&list->items[i], depth + 1);
+        }
+      }
+      printf("]");
+      break;
+    }
+
+    default:
+      printf("<unknown>");
+      break;
   }
+}
+
+static void s_vm_print_value_inline(const MiRtValue* v)
+{
+  s_vm_print_value_inline_depth(v, 0);
 }
 
 static void s_vm_value_to_string(char* out, size_t cap, const MiRtValue* v)
@@ -180,6 +232,7 @@ static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value)
   for (int i = 0; i < 7; ++i)
   {
     saved_vm_regs[i] = vm->regs[1 + i];
+    mi_rt_value_retain(vm->rt, saved_vm_regs[i]);
   }
 
   mi_rt_scope_push_with_parent(vm->rt, parent);
@@ -188,9 +241,10 @@ static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value)
 
   for (int i = 0; i < 7; ++i)
   {
-    vm->regs[1 + i] = saved_vm_regs[i];
+    mi_rt_value_assign(vm->rt, &vm->regs[1 + i], saved_vm_regs[i]);
+    mi_rt_value_release(vm->rt, saved_vm_regs[i]);
   }
-  vm->arg_top = 0;
+  s_vm_arg_clear(vm);
 
   return ret;
 }
@@ -206,6 +260,15 @@ void mi_vm_init(MiVm* vm, MiRuntime* rt)
   vm->rt = rt;
   vm->arg_top = 0;
 
+  for (int i = 0; i < MI_VM_REG_COUNT; ++i)
+  {
+    vm->regs[i] = mi_rt_make_void();
+  }
+  for (int i = 0; i < MI_VM_ARG_STACK_COUNT; ++i)
+  {
+    vm->arg_stack[i] = mi_rt_make_void();
+  }
+
   // Minimal builtins to get started.
   (void) mi_vm_register_command(vm, x_slice_from_cstr("print"), s_vm_cmd_print);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("set"),   s_vm_cmd_set);
@@ -218,6 +281,13 @@ void mi_vm_shutdown(MiVm* vm)
   {
     return;
   }
+
+  for (int i = 0; i < MI_VM_REG_COUNT; ++i)
+  {
+    mi_rt_value_release(vm->rt, vm->regs[i]);
+    vm->regs[i] = mi_rt_make_void();
+  }
+  s_vm_arg_clear(vm);
 
   free(vm->commands);
   vm->commands = NULL;
@@ -311,8 +381,34 @@ static void s_chunk_emit(MiVmChunk* c, MiVmOp op, uint8_t a, uint8_t b, uint8_t 
   c->code[c->code_count++] = ins;
 }
 
+static bool s_chunk_const_eq(MiRtValue a, MiRtValue b)
+{
+  if (a.kind != b.kind)
+  {
+    return false;
+  }
+
+  switch (a.kind)
+  {
+    case MI_RT_VAL_VOID:   return true;
+    case MI_RT_VAL_BOOL:   return a.as.b == b.as.b;
+    case MI_RT_VAL_INT:    return a.as.i == b.as.i;
+    case MI_RT_VAL_FLOAT:  return a.as.f == b.as.f;
+    case MI_RT_VAL_STRING: return s_slice_eq(a.as.s, b.as.s);
+    default:               return false;
+  }
+}
+
 static int32_t s_chunk_add_const(MiVmChunk* c, MiRtValue v)
 {
+  for (size_t i = 0; i < c->const_count; ++i)
+  {
+    if (s_chunk_const_eq(c->consts[i], v))
+    {
+      return (int32_t) i;
+    }
+  }
+
   if (c->const_count == c->const_capacity)
   {
     size_t new_cap = c->const_capacity ? c->const_capacity * 2u : 64u;
@@ -412,6 +508,7 @@ typedef struct MiVmBuild
   MiVm*       vm;
   MiVmChunk*  chunk;
   uint8_t     next_reg;
+  uint8_t     reg_base;
 
   /* Loop context stack (compiler-only). Needed for break/continue. */
   int         loop_depth;
@@ -478,6 +575,20 @@ static void s_chunk_patch_imm(MiVmChunk* c, size_t ins_index, int32_t imm)
     return;
   }
   c->code[ins_index].imm = imm;
+
+  /* Suppress JMP/JT/JF 0: fallthrough is implicit. */
+  if (imm == 0)
+  {
+    MiVmOp op = (MiVmOp)c->code[ins_index].op;
+    if (op == MI_VM_OP_JUMP || op == MI_VM_OP_JUMP_IF_TRUE || op == MI_VM_OP_JUMP_IF_FALSE)
+    {
+      c->code[ins_index].op = (uint8_t)MI_VM_OP_NOOP;
+      c->code[ins_index].a = 0;
+      c->code[ins_index].b = 0;
+      c->code[ins_index].c = 0;
+      c->code[ins_index].imm = 0;
+    }
+  }
 }
 
 static bool s_expr_is_lit_string(const MiExpr* e, const char* cstr)
@@ -503,7 +614,7 @@ static void s_emit_scope_pops(MiVmBuild* b, int count)
   }
 }
 
-static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e);
+static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e, bool wants_result);
 
 static void s_compile_script_inline(MiVmBuild* b, const MiScript* script)
 {
@@ -516,7 +627,7 @@ static void s_compile_script_inline(MiVmBuild* b, const MiScript* script)
   while (it)
   {
     const MiCommand* cmd = it->command;
-    b->next_reg = 0;
+    b->next_reg = b->reg_base;
 
     MiExpr fake;
     memset(&fake, 0, sizeof(fake));
@@ -525,7 +636,7 @@ static void s_compile_script_inline(MiVmBuild* b, const MiScript* script)
     fake.as.command.args = cmd ? cmd->args : NULL;
     fake.as.command.argc = cmd ? (unsigned int) cmd->argc : 0;
 
-    (void) s_compile_command_expr(b, &fake);
+    (void) s_compile_command_expr(b, &fake, false);
     it = it->next;
   }
 }
@@ -546,7 +657,7 @@ static void s_compile_script_inline_to_reg(MiVmBuild* b, const MiScript* script,
   while (it)
   {
     const MiCommand* cmd = it->command;
-    b->next_reg = 0;
+    b->next_reg = b->reg_base;
 
     MiExpr fake;
     memset(&fake, 0, sizeof(fake));
@@ -555,7 +666,8 @@ static void s_compile_script_inline_to_reg(MiVmBuild* b, const MiScript* script,
     fake.as.command.args = cmd ? cmd->args : NULL;
     fake.as.command.argc = cmd ? (unsigned int)cmd->argc : 0;
 
-    last = s_compile_command_expr(b, &fake);
+    bool wants_result = (it->next == NULL);
+    last = s_compile_command_expr(b, &fake, wants_result);
     have_last = true;
 
     it = it->next;
@@ -574,7 +686,7 @@ static void s_compile_script_inline_to_reg(MiVmBuild* b, const MiScript* script,
   }
 }
 
-static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
+static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e, bool wants_result)
 {
   uint8_t dst = s_alloc_reg(b);
   uint8_t argc = 0;
@@ -582,6 +694,70 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
   /* Start a fresh argument list for every call.
      This also makes disassembly easier to read. */
   s_chunk_emit(b->chunk, MI_VM_OP_ARG_CLEAR, 0, 0, 0, 0);
+
+  /* Special form: set :: <lvalue> <value>
+     Supports:
+       set :: name value
+       set :: $name value
+       set :: $list[index] value
+     Falls back to regular command dispatch for indirect names. */
+  if (s_expr_is_lit_string(e->as.command.head, "set") && e->as.command.argc == 2u)
+  {
+    const MiExprList* it = e->as.command.args;
+    const MiExpr* lvalue = it ? it->expr : NULL;
+    it = it ? it->next : NULL;
+    const MiExpr* rhs = it ? it->expr : NULL;
+
+    if (!lvalue || !rhs)
+    {
+      mi_error("set: expected lvalue and value\n");
+      int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      return dst;
+    }
+
+    /* lvalue: bare name */
+    if (lvalue->kind == MI_EXPR_STRING_LITERAL)
+    {
+      uint8_t rhs_reg = s_compile_expr(b, rhs);
+      int32_t sym = s_chunk_add_symbol(b->chunk, lvalue->as.string_lit.value);
+      s_chunk_emit(b->chunk, MI_VM_OP_STORE_VAR, rhs_reg, 0, 0, sym);
+      if (wants_result)
+      {
+        s_chunk_emit(b->chunk, MI_VM_OP_MOV, dst, rhs_reg, 0, 0);
+      }
+      return dst;
+    }
+
+    /* lvalue: $name (direct only) */
+    if (lvalue->kind == MI_EXPR_VAR && !lvalue->as.var.is_indirect)
+    {
+      uint8_t rhs_reg = s_compile_expr(b, rhs);
+      int32_t sym = s_chunk_add_symbol(b->chunk, lvalue->as.var.name);
+      s_chunk_emit(b->chunk, MI_VM_OP_STORE_VAR, rhs_reg, 0, 0, sym);
+      if (wants_result)
+      {
+        s_chunk_emit(b->chunk, MI_VM_OP_MOV, dst, rhs_reg, 0, 0);
+      }
+      return dst;
+    }
+
+    /* lvalue: $target[index] */
+    if (lvalue->kind == MI_EXPR_INDEX)
+    {
+      uint8_t base_reg = s_compile_expr(b, lvalue->as.index.target);
+      uint8_t key_reg = s_compile_expr(b, lvalue->as.index.index);
+      uint8_t rhs_reg = s_compile_expr(b, rhs);
+      s_chunk_emit(b->chunk, MI_VM_OP_STORE_INDEX, base_reg, key_reg, rhs_reg, 0);
+      if (wants_result)
+      {
+        s_chunk_emit(b->chunk, MI_VM_OP_MOV, dst, rhs_reg, 0, 0);
+      }
+      return dst;
+    }
+
+    /* Indirect or unsupported lvalue: fall back to command call. */
+  }
 
   /* Special form: call :: <block>
      This compiles to a direct CALL_BLOCK, bypassing command dispatch. */
@@ -605,13 +781,19 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
     if (b->loop_depth <= 0)
     {
       mi_error("break: not inside a loop\n");
-      int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
-      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      if (wants_result)
+      {
+        int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+        s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      }
       return dst;
     }
 
-    MiRtValue v = mi_rt_make_void();
-    s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, s_chunk_add_const(b->chunk, v));
+    if (wants_result)
+    {
+      MiRtValue v = mi_rt_make_void();
+      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, s_chunk_add_const(b->chunk, v));
+    }
 
     int idx = b->loop_depth - 1;
 
@@ -641,13 +823,19 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
     if (b->loop_depth <= 0)
     {
       mi_error("continue: not inside a loop\n");
-      int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
-      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      if (wants_result)
+      {
+        int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+        s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      }
       return dst;
     }
 
-    MiRtValue v = mi_rt_make_void();
-    s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, s_chunk_add_const(b->chunk, v));
+    if (wants_result)
+    {
+      MiRtValue v = mi_rt_make_void();
+      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, s_chunk_add_const(b->chunk, v));
+    }
 
     int idx = b->loop_depth - 1;
 
@@ -714,8 +902,11 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
     if (!cond || !then_block)
     {
       mi_error("if: expected cond and then block\n");
-      int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
-      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      if (wants_result)
+      {
+        int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+        s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      }
       return dst;
     }
 
@@ -735,7 +926,14 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
       {
         s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_PUSH, 0, 0, 0, 0);
         b->inline_scope_depth += 1;
-        s_compile_script_inline_to_reg(b, then_block->as.block.script, dst);
+        if (wants_result)
+        {
+          s_compile_script_inline_to_reg(b, then_block->as.block.script, dst);
+        }
+        else
+        {
+          s_compile_script_inline(b, then_block->as.block.script);
+        }
         s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_POP, 0, 0, 0, 0);
         b->inline_scope_depth -= 1;
       }
@@ -795,7 +993,14 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
         {
           s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_PUSH, 0, 0, 0, 0);
           b->inline_scope_depth += 1;
-          s_compile_script_inline_to_reg(b, else_block->as.block.script, dst);
+          if (wants_result)
+          {
+            s_compile_script_inline_to_reg(b, else_block->as.block.script, dst);
+          }
+          else
+          {
+            s_compile_script_inline(b, else_block->as.block.script);
+          }
           s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_POP, 0, 0, 0, 0);
           b->inline_scope_depth -= 1;
         }
@@ -886,7 +1091,12 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
       mi_error("while: loop nesting too deep\n");
     }
 
+    uint8_t saved_reg_base = b->reg_base;
+    b->reg_base = b->next_reg;
+
     s_compile_script_inline(b, body_block->as.block.script);
+
+    b->reg_base = saved_reg_base;
 
     s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_POP, 0, 0, 0, 0);
     b->inline_scope_depth -= 1;
@@ -900,6 +1110,171 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e)
     }
 
     /* loop_end label is here */
+    size_t loop_end = b->chunk->code_count;
+
+    /* Patch JF to jump to loop_end */
+    {
+      int32_t rel_end = (int32_t)((int64_t)loop_end - (int64_t)(jf_index + 1u));
+      s_chunk_patch_imm(b->chunk, jf_index, rel_end);
+    }
+
+    /* Patch break jumps to loop_end */
+    if (loop_idx >= 0)
+    {
+      for (size_t bi = 0; bi < b->loops[loop_idx].break_jump_count; ++bi)
+      {
+        size_t bj = b->loops[loop_idx].break_jumps[bi];
+        int32_t rel = (int32_t)((int64_t)loop_end - (int64_t)(bj + 1u));
+        s_chunk_patch_imm(b->chunk, bj, rel);
+      }
+      b->loop_depth -= 1;
+    }
+
+    return dst;
+  }
+
+  /* Special form: foreach
+     Grammar (command args):
+       foreach :: <varname> <expr_list> <body_block>
+
+     Notes:
+       - <varname> must be a literal identifier (string literal).
+       - <expr_list> is evaluated once.
+       - The body is inlined so break/continue compile to jumps.
+       - A fresh scope is created for each iteration.
+
+     Compiles to:
+       list = <expr_list>
+       len = LEN(list)
+       idx = -1
+       inc_label:
+         idx = idx + 1
+         cond = idx < len
+         JF cond, end
+         SCOPE_PUSH
+         <varname> = INDEX(list, idx)
+         <body>
+         SCOPE_POP
+         JMP inc_label
+       end:
+  */
+  if (s_expr_is_lit_string(e->as.command.head, "foreach"))
+  {
+    const MiExprList* it = e->as.command.args;
+    const MiExpr* varname_expr = it ? it->expr : NULL;
+    it = it ? it->next : NULL;
+    const MiExpr* list_expr = it ? it->expr : NULL;
+    it = it ? it->next : NULL;
+    const MiExpr* body_block = it ? it->expr : NULL;
+
+    if (!varname_expr || !list_expr || !body_block)
+    {
+      mi_error("foreach: expected varname, expression, and body block\n");
+      if (wants_result)
+      {
+        int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+        s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      }
+      return dst;
+    }
+
+    if (varname_expr->kind != MI_EXPR_STRING_LITERAL)
+    {
+      mi_error("foreach: varname must be a literal identifier\n");
+      if (wants_result)
+      {
+        int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+        s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      }
+      return dst;
+    }
+
+    if (body_block->kind != MI_EXPR_BLOCK || !body_block->as.block.script)
+    {
+      mi_error("foreach: body must be a literal block\n");
+      if (wants_result)
+      {
+        int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+        s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      }
+      return dst;
+    }
+
+    /* Result of foreach is void when used as an expression. */
+    if (wants_result)
+    {
+      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, dst, 0, 0, s_chunk_add_const(b->chunk, mi_rt_make_void()));
+    }
+
+    int32_t foreach_sym = s_chunk_add_symbol(b->chunk, varname_expr->as.string_lit.value);
+
+    uint8_t list_reg = s_compile_expr(b, list_expr);
+
+    uint8_t len_reg = s_alloc_reg(b);
+    s_chunk_emit(b->chunk, MI_VM_OP_LEN, len_reg, list_reg, 0, 0);
+
+    uint8_t idx_reg = s_alloc_reg(b);
+    s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, idx_reg, 0, 0, s_chunk_add_const(b->chunk, mi_rt_make_int(-1)));
+
+    uint8_t one_reg = s_alloc_reg(b);
+    s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, one_reg, 0, 0, s_chunk_add_const(b->chunk, mi_rt_make_int(1)));
+
+    size_t inc_label = b->chunk->code_count;
+
+    /* idx = idx + 1 */
+    s_chunk_emit(b->chunk, MI_VM_OP_ADD, idx_reg, idx_reg, one_reg, 0);
+
+    /* cond = idx < len */
+    uint8_t cond_reg = s_alloc_reg(b);
+    s_chunk_emit(b->chunk, MI_VM_OP_LT, cond_reg, idx_reg, len_reg, 0);
+
+    /* JF cond, <to end> */
+    size_t jf_index = b->chunk->code_count;
+    s_chunk_emit(b->chunk, MI_VM_OP_JUMP_IF_FALSE, cond_reg, 0, 0, 0);
+
+    int loop_scope_base = b->inline_scope_depth;
+    s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_PUSH, 0, 0, 0, 0);
+    b->inline_scope_depth += 1;
+
+    int loop_idx = -1;
+    if (b->loop_depth < (int)(sizeof(b->loops) / sizeof(b->loops[0])))
+    {
+      loop_idx = b->loop_depth;
+      b->loop_depth += 1;
+      b->loops[loop_idx].loop_start_ip = inc_label;
+      b->loops[loop_idx].break_jump_count = 0;
+      b->loops[loop_idx].scope_base_depth = loop_scope_base;
+    }
+    else
+    {
+      mi_error("foreach: loop nesting too deep\n");
+    }
+
+    /* foreach var = list[idx] */
+    {
+      uint8_t item_reg = s_alloc_reg(b);
+      s_chunk_emit(b->chunk, MI_VM_OP_INDEX, item_reg, list_reg, idx_reg, 0);
+      s_chunk_emit(b->chunk, MI_VM_OP_STORE_VAR, item_reg, 0, 0, foreach_sym);
+    }
+
+    uint8_t saved_reg_base = b->reg_base;
+    b->reg_base = b->next_reg;
+
+    s_compile_script_inline(b, body_block->as.block.script);
+
+    b->reg_base = saved_reg_base;
+
+    s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_POP, 0, 0, 0, 0);
+    b->inline_scope_depth -= 1;
+
+    /* JMP back to inc_label */
+    {
+      size_t jmp_index = b->chunk->code_count;
+      s_chunk_emit(b->chunk, MI_VM_OP_JUMP, 0, 0, 0, 0);
+      int32_t rel_back = (int32_t)((int64_t)inc_label - (int64_t)(jmp_index + 1u));
+      s_chunk_patch_imm(b->chunk, jmp_index, rel_back);
+    }
+
     size_t loop_end = b->chunk->code_count;
 
     /* Patch JF to jump to loop_end */
@@ -1076,7 +1451,7 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
       }
 
     case MI_EXPR_COMMAND:
-      return s_compile_command_expr(b, e);
+      return s_compile_command_expr(b, e, true);
 
     case MI_EXPR_BLOCK:
       {
@@ -1091,6 +1466,30 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
 
         int32_t id = s_chunk_add_subchunk(b->chunk, sub);
         s_chunk_emit(b->chunk, MI_VM_OP_LOAD_BLOCK, r, 0, 0, id);
+        return r;
+      }
+    case MI_EXPR_LIST:
+      {
+        uint8_t r = s_alloc_reg(b);
+        s_chunk_emit(b->chunk, MI_VM_OP_LIST_NEW, r, 0, 0, 0);
+
+        const MiExprList* it = e->as.list.items;
+        while (it)
+        {
+          uint8_t item_reg = s_compile_expr(b, it->expr);
+          s_chunk_emit(b->chunk, MI_VM_OP_LIST_PUSH, r, item_reg, 0, 0);
+          it = it->next;
+        }
+
+        return r;
+      }
+
+    case MI_EXPR_INDEX:
+      {
+        uint8_t r = s_alloc_reg(b);
+        uint8_t base_reg = s_compile_expr(b, e->as.index.target);
+        uint8_t key_reg = s_compile_expr(b, e->as.index.index);
+        s_chunk_emit(b->chunk, MI_VM_OP_INDEX, r, base_reg, key_reg, 0);
         return r;
       }
 
@@ -1140,7 +1539,7 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
     fake.as.command.args = cmd ? cmd->args : NULL;
     fake.as.command.argc = cmd ? (unsigned int) cmd->argc : 0;
 
-    (void) s_compile_command_expr(&b, &fake);
+    (void) s_compile_command_expr(&b, &fake, false);
     it = it->next;
   }
 
@@ -1278,7 +1677,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
     return mi_rt_make_void();
   }
 
-  vm->arg_top = 0;
+  s_vm_arg_clear(vm);
   MiRtValue last = mi_rt_make_void();
 
   size_t pc = 0;
@@ -1291,7 +1690,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
         break;
 
       case MI_VM_OP_LOAD_CONST:
-        vm->regs[ins.a] = chunk->consts[ins.imm];
+        s_vm_reg_set(vm, ins.a, chunk->consts[ins.imm]);
         break;
 
       case MI_VM_OP_LOAD_BLOCK:
@@ -1299,7 +1698,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           if (ins.imm < 0 || (size_t)ins.imm >= chunk->subchunk_count)
           {
             mi_error("mi_vm: LOAD_BLOCK invalid subchunk index\n");
-            vm->regs[ins.a] = mi_rt_make_void();
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
             break;
           }
 
@@ -1308,27 +1707,143 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           b->ptr = (void*)chunk->subchunks[(size_t)ins.imm];
           b->env = vm->rt->current;
           b->id = (uint32_t)ins.imm;
-          vm->regs[ins.a] = mi_rt_make_block(b);
+          s_vm_reg_set(vm, ins.a, mi_rt_make_block(b));
         } break;
 
       case MI_VM_OP_MOV:
-        vm->regs[ins.a] = vm->regs[ins.b];
+        s_vm_reg_set(vm, ins.a, vm->regs[ins.b]);
         break;
+
+
+      case MI_VM_OP_LIST_NEW:
+        {
+          MiRtList* list = mi_rt_list_create(vm->rt);
+          if (!list)
+          {
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+            break;
+          }
+          s_vm_reg_set(vm, ins.a, mi_rt_make_list(list));
+        } break;
+
+      case MI_VM_OP_LIST_PUSH:
+        {
+          MiRtValue base = vm->regs[ins.a];
+          MiRtValue v = vm->regs[ins.b];
+          if (base.kind != MI_RT_VAL_LIST || !base.as.list)
+          {
+            mi_error("mi_vm: LIST_PUSH base is not a list\n");
+            break;
+          }
+          (void) mi_rt_list_push(base.as.list, v);
+        } break;
+
+      case MI_VM_OP_INDEX:
+        {
+          MiRtValue base = vm->regs[ins.b];
+          MiRtValue key = vm->regs[ins.c];
+          if (base.kind == MI_RT_VAL_LIST && base.as.list && key.kind == MI_RT_VAL_INT)
+          {
+            MiRtList* list = base.as.list;
+            int64_t idx = key.as.i;
+            if (idx < 0 || (uint64_t)idx >= list->count)
+            {
+              s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+              break;
+            }
+            s_vm_reg_set(vm, ins.a, list->items[(size_t)idx]);
+            break;
+          }
+
+          if (base.kind == MI_RT_VAL_PAIR && base.as.pair && key.kind == MI_RT_VAL_INT)
+          {
+            long long idx = key.as.i;
+            if (idx != 0 && idx != 1)
+            {
+              s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+              break;
+            }
+            s_vm_reg_set(vm, ins.a, base.as.pair->items[(int)idx]);
+            break;
+          }
+
+          mi_error("mi_vm: INDEX unsupported types\n");
+          s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+        } break;
+
+      case MI_VM_OP_STORE_INDEX:
+        {
+          MiRtValue base = vm->regs[ins.a];
+          MiRtValue key = vm->regs[ins.b];
+          MiRtValue value = vm->regs[ins.c];
+
+          if (base.kind == MI_RT_VAL_LIST && base.as.list && key.kind == MI_RT_VAL_INT)
+          {
+            MiRtList* list = base.as.list;
+            long long idx = key.as.i;
+            if (idx < 0 || (size_t)idx >= list->count)
+            {
+              mi_error("mi_vm: STORE_INDEX list index out of range\n");
+              break;
+            }
+            mi_rt_value_assign(vm->rt, &list->items[(size_t)idx], value);
+            break;
+          }
+
+          if (base.kind == MI_RT_VAL_PAIR && base.as.pair && key.kind == MI_RT_VAL_INT)
+          {
+            long long idx = key.as.i;
+            if (idx != 0 && idx != 1)
+            {
+              mi_error("mi_vm: STORE_INDEX pair index out of range\n");
+              break;
+            }
+            mi_rt_pair_set(vm->rt, base.as.pair, (int)idx, value);
+            break;
+          }
+
+          mi_error("mi_vm: STORE_INDEX unsupported types\n");
+        } break;
+
+      case MI_VM_OP_LEN:
+        {
+          MiRtValue v = vm->regs[ins.b];
+          if (v.kind == MI_RT_VAL_LIST && v.as.list)
+          {
+            s_vm_reg_set(vm, ins.a, mi_rt_make_int((int64_t)v.as.list->count));
+            break;
+          }
+
+          if (v.kind == MI_RT_VAL_PAIR && v.as.pair)
+          {
+            s_vm_reg_set(vm, ins.a, mi_rt_make_int(2));
+            break;
+          }
+
+          if (v.kind == MI_RT_VAL_STRING && v.as.s.ptr)
+          {
+            s_vm_reg_set(vm, ins.a, mi_rt_make_int((int64_t)v.as.s.length));
+            break;
+          }
+
+          mi_error("mi_vm: LEN unsupported type\n");
+          s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+        } break;
 
       case MI_VM_OP_NEG:
         {
           MiRtValue x = vm->regs[ins.b];
           if (x.kind == MI_RT_VAL_INT)
           {
-            vm->regs[ins.a] = mi_rt_make_int(-x.as.i);
+            s_vm_reg_set(vm, ins.a, mi_rt_make_int(-x.as.i));
           }
           else if (x.kind == MI_RT_VAL_FLOAT)
           {
-            vm->regs[ins.a] = mi_rt_make_float(-x.as.f);
+            s_vm_reg_set(vm, ins.a, mi_rt_make_float(-x.as.f));
           }
           else
           {
-            vm->regs[ins.a] = mi_rt_make_void();
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
           }
         } break;
 
@@ -1337,11 +1852,11 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           MiRtValue x = vm->regs[ins.b];
           if (x.kind == MI_RT_VAL_BOOL)
           {
-            vm->regs[ins.a] = mi_rt_make_bool(!x.as.b);
+            s_vm_reg_set(vm, ins.a, mi_rt_make_bool(!x.as.b));
           }
           else
           {
-            vm->regs[ins.a] = mi_rt_make_void();
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
           }
         } break;
 
@@ -1351,7 +1866,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
       case MI_VM_OP_DIV:
       case MI_VM_OP_MOD:
         {
-          vm->regs[ins.a] = s_vm_binary_numeric((MiVmOp) ins.op, &vm->regs[ins.b], &vm->regs[ins.c]);
+          s_vm_reg_set(vm, ins.a, s_vm_binary_numeric((MiVmOp) ins.op, &vm->regs[ins.b], &vm->regs[ins.c]));
         } break;
 
       case MI_VM_OP_EQ:
@@ -1361,7 +1876,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
       case MI_VM_OP_GT:
       case MI_VM_OP_GTEQ:
         {
-          vm->regs[ins.a] = s_vm_binary_compare((MiVmOp) ins.op, &vm->regs[ins.b], &vm->regs[ins.c]);
+          s_vm_reg_set(vm, ins.a, s_vm_binary_compare((MiVmOp) ins.op, &vm->regs[ins.b], &vm->regs[ins.c]));
         } break;
 
       case MI_VM_OP_AND:
@@ -1370,11 +1885,11 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           MiRtValue y = vm->regs[ins.c];
           if (x.kind == MI_RT_VAL_BOOL && y.kind == MI_RT_VAL_BOOL)
           {
-            vm->regs[ins.a] = mi_rt_make_bool(x.as.b && y.as.b);
+            s_vm_reg_set(vm, ins.a, mi_rt_make_bool(x.as.b && y.as.b));
           }
           else
           {
-            vm->regs[ins.a] = mi_rt_make_void();
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
           }
         } break;
 
@@ -1384,11 +1899,11 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           MiRtValue y = vm->regs[ins.c];
           if (x.kind == MI_RT_VAL_BOOL && y.kind == MI_RT_VAL_BOOL)
           {
-            vm->regs[ins.a] = mi_rt_make_bool(x.as.b || y.as.b);
+            s_vm_reg_set(vm, ins.a, mi_rt_make_bool(x.as.b || y.as.b));
           }
           else
           {
-            vm->regs[ins.a] = mi_rt_make_void();
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
           }
         } break;
 
@@ -1401,7 +1916,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             mi_error_fmt("undefined variable: %.*s\n", (int) name.length, name.ptr);
             v = mi_rt_make_void();
           }
-          vm->regs[ins.a] = v;
+          s_vm_reg_set(vm, ins.a, v);
         } break;
 
       case MI_VM_OP_STORE_VAR:
@@ -1416,7 +1931,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           if (n.kind != MI_RT_VAL_STRING)
           {
             mi_error("indirect variable name must be string\n");
-            vm->regs[ins.a] = mi_rt_make_void();
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
             break;
           }
           MiRtValue v;
@@ -1425,11 +1940,11 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             mi_error_fmt("undefined variable: %.*s\n", (int) n.as.s.length, n.as.s.ptr);
             v = mi_rt_make_void();
           }
-          vm->regs[ins.a] = v;
+          s_vm_reg_set(vm, ins.a, v);
         } break;
 
       case MI_VM_OP_ARG_CLEAR:
-        vm->arg_top = 0;
+        s_vm_arg_clear(vm);
         break;
 
       case MI_VM_OP_ARG_PUSH:
@@ -1439,7 +1954,8 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             mi_error("mi_vm: arg stack overflow\n");
             break;
           }
-          vm->arg_stack[vm->arg_top++] = vm->regs[ins.a];
+          mi_rt_value_assign(vm->rt, &vm->arg_stack[vm->arg_top], vm->regs[ins.a]);
+          vm->arg_top += 1;
         } break;
 
       case MI_VM_OP_ARG_PUSH_CONST:
@@ -1452,10 +1968,12 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           if (ins.imm < 0 || (size_t)ins.imm >= chunk->const_count)
           {
             mi_error("mi_vm: ARG_PUSH_CONST invalid const index\n");
-            vm->arg_stack[vm->arg_top++] = mi_rt_make_void();
+            mi_rt_value_assign(vm->rt, &vm->arg_stack[vm->arg_top], mi_rt_make_void());
+            vm->arg_top += 1;
             break;
           }
-          vm->arg_stack[vm->arg_top++] = chunk->consts[ins.imm];
+          mi_rt_value_assign(vm->rt, &vm->arg_stack[vm->arg_top], chunk->consts[ins.imm]);
+          vm->arg_top += 1;
         } break;
 
       case MI_VM_OP_ARG_PUSH_VAR_SYM:
@@ -1468,7 +1986,8 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           if (ins.imm < 0 || (size_t)ins.imm >= chunk->symbol_count)
           {
             mi_error("mi_vm: ARG_PUSH_VAR_SYM invalid symbol index\n");
-            vm->arg_stack[vm->arg_top++] = mi_rt_make_void();
+            mi_rt_value_assign(vm->rt, &vm->arg_stack[vm->arg_top], mi_rt_make_void());
+            vm->arg_top += 1;
             break;
           }
           XSlice name = chunk->symbols[ins.imm];
@@ -1478,7 +1997,8 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             mi_error_fmt("undefined variable: %.*s\n", (int)name.length, name.ptr);
             v = mi_rt_make_void();
           }
-          vm->arg_stack[vm->arg_top++] = v;
+          mi_rt_value_assign(vm->rt, &vm->arg_stack[vm->arg_top], v);
+          vm->arg_top += 1;
         } break;
 
       case MI_VM_OP_CALL_CMD:
@@ -1487,26 +2007,41 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           if (argc > vm->arg_top)
           {
             mi_error("mi_vm: arg stack underflow\n");
-            vm->regs[ins.a] = mi_rt_make_void();
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
             break;
           }
 
           MiRtValue argv[MI_VM_ARG_STACK_COUNT];
-          for (int i = argc - 1; i >= 0; --i)
+          int base = (int)vm->arg_top - argc;
+          for (int i = 0; i < argc; i += 1)
           {
-            argv[i] = vm->arg_stack[--vm->arg_top];
+            argv[i] = vm->arg_stack[base + i];
+            mi_rt_value_retain(vm->rt, argv[i]);
           }
+          for (int i = 0; i < argc; i += 1)
+          {
+            mi_rt_value_assign(vm->rt, &vm->arg_stack[base + i], mi_rt_make_void());
+          }
+          vm->arg_top = base;
 
           MiVmCommandFn fn = chunk->cmd_fns[ins.imm];
           if (!fn)
           {
             mi_error("mi_vm: CALL_CMD null function\n");
-            vm->regs[ins.a] = mi_rt_make_void();
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+            for (int i = 0; i < argc; i += 1)
+            {
+              mi_rt_value_release(vm->rt, argv[i]);
+            }
             break;
           }
 
-          vm->regs[ins.a] = fn(vm, argc, argv);
-          last = vm->regs[ins.a];
+          s_vm_reg_set(vm, ins.a, fn(vm, argc, argv));
+          for (int i = 0; i < argc; i += 1)
+          {
+            mi_rt_value_release(vm->rt, argv[i]);
+          }
+          mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
         } break;
 
       case MI_VM_OP_CALL_CMD_DYN:
@@ -1515,7 +2050,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           if (argc > vm->arg_top)
           {
             mi_error("mi_vm: arg stack underflow\n");
-            vm->regs[ins.a] = mi_rt_make_void();
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
             break;
           }
 
@@ -1523,33 +2058,48 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           if (head.kind != MI_RT_VAL_STRING)
           {
             mi_error("mi_vm: dynamic command head must be string\n");
-            vm->regs[ins.a] = mi_rt_make_void();
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
             break;
           }
 
           MiRtValue argv[MI_VM_ARG_STACK_COUNT];
-          for (int i = argc - 1; i >= 0; --i)
+          int base = (int)vm->arg_top - argc;
+          for (int i = 0; i < argc; i += 1)
           {
-            argv[i] = vm->arg_stack[--vm->arg_top];
+            argv[i] = vm->arg_stack[base + i];
+            mi_rt_value_retain(vm->rt, argv[i]);
           }
+          for (int i = 0; i < argc; i += 1)
+          {
+            mi_rt_value_assign(vm->rt, &vm->arg_stack[base + i], mi_rt_make_void());
+          }
+          vm->arg_top = base;
 
           MiVmCommandFn fn = s_vm_find_command_fn(vm, head.as.s);
           if (!fn)
           {
             mi_error_fmt("mi_vm: unknown command: %.*s\n", (int)head.as.s.length, head.as.s.ptr);
-            vm->regs[ins.a] = mi_rt_make_void();
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+            for (int i = 0; i < argc; i += 1)
+            {
+              mi_rt_value_release(vm->rt, argv[i]);
+            }
             break;
           }
 
-          vm->regs[ins.a] = fn(vm, argc, argv);
-          last = vm->regs[ins.a];
+          s_vm_reg_set(vm, ins.a, fn(vm, argc, argv));
+          for (int i = 0; i < argc; i += 1)
+          {
+            mi_rt_value_release(vm->rt, argv[i]);
+          }
+          mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
         } break;
 
       case MI_VM_OP_CALL_BLOCK:
         {
           MiRtValue ret = s_vm_exec_block_value(vm, vm->regs[ins.b]);
-          vm->regs[ins.a] = ret;
-          last = ret;
+          s_vm_reg_set(vm, ins.a, ret);
+          mi_rt_value_assign(vm->rt, &last, ret);
         } break;
 
       case MI_VM_OP_SCOPE_PUSH:
@@ -1609,7 +2159,11 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
         } break;
 
       case MI_VM_OP_RETURN:
-        return vm->regs[ins.a];
+        {
+          MiRtValue ret = vm->regs[ins.a];
+          mi_rt_value_retain(vm->rt, ret);
+          return ret;
+        }
 
       case MI_VM_OP_HALT:
         return last;
@@ -1635,6 +2189,11 @@ static const char* s_op_name(MiVmOp op)
     case MI_VM_OP_LOAD_CONST:         return "LDC";
     case MI_VM_OP_LOAD_BLOCK:         return "LDB";
     case MI_VM_OP_MOV:                return "MOV";
+    case MI_VM_OP_LIST_NEW:           return "LNEW";
+    case MI_VM_OP_LIST_PUSH:          return "LPUSH";
+    case MI_VM_OP_INDEX:              return "INDEX";
+    case MI_VM_OP_STORE_INDEX:        return "STINDEX";
+    case MI_VM_OP_LEN:                return "LEN";
     case MI_VM_OP_NEG:                return "NEG";
     case MI_VM_OP_NOT:                return "NOT";
     case MI_VM_OP_ADD:                return "ADD";
@@ -1770,14 +2329,10 @@ void mi_vm_disasm(const MiVmChunk* chunk)
 
           if (ins.imm >= 0 && (size_t)ins.imm < chunk->const_count)
           {
-            /* comment: const_N <value> */
             char vbuf[96];
             vbuf[0] = '\0';
-            /* Print value inline into a buffer by using the same printer via a temp FILE? Not available.
-               Keep consistent with previous file: comment shows const_N and value is printed by LOAD_CONST itself only.
-               So here we keep the value out; LOAD_CONST already shows const_N. */
-            (void)vbuf;
-            (void)snprintf(comment, sizeof(comment), "const_%d", (int)ins.imm);
+            s_vm_value_to_string(vbuf, sizeof(vbuf), &chunk->consts[(size_t)ins.imm]);
+            (void)snprintf(comment, sizeof(comment), "const_%d %s", (int)ins.imm, vbuf);
           }
           else
           {
@@ -1791,6 +2346,26 @@ void mi_vm_disasm(const MiVmChunk* chunk)
         break;
 
       case MI_VM_OP_MOV:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, r%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b);
+        break;
+
+      case MI_VM_OP_LIST_NEW:
+        (void)snprintf(instr, sizeof(instr), "%s r%u", s_op_name(op), (unsigned)ins.a);
+        break;
+
+      case MI_VM_OP_LIST_PUSH:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, r%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b);
+        break;
+
+      case MI_VM_OP_INDEX:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, r%u, r%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, (unsigned)ins.c);
+        break;
+
+      case MI_VM_OP_STORE_INDEX:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, r%u, r%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, (unsigned)ins.c);
+        break;
+
+      case MI_VM_OP_LEN:
         (void)snprintf(instr, sizeof(instr), "%s r%u, r%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b);
         break;
 
@@ -1861,13 +2436,8 @@ void mi_vm_disasm(const MiVmChunk* chunk)
 
           (void)snprintf(instr, sizeof(instr), "%s ", s_op_name(op));
 
-          /* We'll append the value into instr by printing into a temp buffer via value-to-string helper if available.
-             If not available in this translation unit, fall back to printing directly like before by using s_vm_print_value_inline
-             and then padding. Here we do the safe route: keep instr as "ARG_PUSH_CONST" and print value inline separately. */
           if (ins.imm >= 0 && (size_t)ins.imm < chunk->const_count)
           {
-            /* Print "ARG_PUSH_CONST " now, then inline value, then pad+comment. */
-            /* We'll handle this as a special case after switch. */
             (void)snprintf(comment, sizeof(comment), "const_%d", (int)ins.imm);
             (void)snprintf(vbuf, sizeof(vbuf), "%d", 0);
           }
@@ -1876,7 +2446,7 @@ void mi_vm_disasm(const MiVmChunk* chunk)
             (void)snprintf(comment, sizeof(comment), "<oob>");
           }
 
-          /* Mark as special by storing op name in instr and using comment; actual value printed later. */
+          (void)vbuf;
         } break;
 
       case MI_VM_OP_ARG_PUSH_SYM:
@@ -1933,16 +2503,52 @@ void mi_vm_disasm(const MiVmChunk* chunk)
         break;
 
       case MI_VM_OP_JUMP:
-        (void)snprintf(instr, sizeof(instr), "%s %d", s_op_name(op), (int)ins.imm);
-        break;
+        {
+          (void)snprintf(instr, sizeof(instr), "%s %d", s_op_name(op), (int)ins.imm);
+
+          int64_t ins_target = (int64_t)i + (int64_t)ins.imm;
+          uint64_t pc_target = (uint64_t)pc + ((uint64_t)(int64_t)ins.imm * (uint64_t)sizeof(MiVmIns));
+          if (ins_target < 0 || (size_t)ins_target >= chunk->code_count)
+          {
+            (void)snprintf(comment, sizeof(comment), "-> 0x%08zx (OOB)", (size_t)pc_target);
+          }
+          else
+          {
+            (void)snprintf(comment, sizeof(comment), "-> 0x%08zx", (size_t)pc_target);
+          }
+        } break;
 
       case MI_VM_OP_JUMP_IF_TRUE:
-        (void)snprintf(instr, sizeof(instr), "%s r%u, %d", s_op_name(op), (unsigned)ins.a, (int)ins.imm);
-        break;
+        {
+          (void)snprintf(instr, sizeof(instr), "%s r%u, %d", s_op_name(op), (unsigned)ins.a, (int)ins.imm);
+
+          int64_t ins_target = (int64_t)i + (int64_t)ins.imm;
+          uint64_t pc_target = (uint64_t)pc + ((uint64_t)(int64_t)ins.imm * (uint64_t)sizeof(MiVmIns));
+          if (ins_target < 0 || (size_t)ins_target >= chunk->code_count)
+          {
+            (void)snprintf(comment, sizeof(comment), "-> 0x%08zx (OOB)", (size_t)pc_target);
+          }
+          else
+          {
+            (void)snprintf(comment, sizeof(comment), "-> 0x%08zx", (size_t)pc_target);
+          }
+        } break;
 
       case MI_VM_OP_JUMP_IF_FALSE:
-        (void)snprintf(instr, sizeof(instr), "%s r%u, %d", s_op_name(op), (unsigned)ins.a, (int)ins.imm);
-        break;
+        {
+          (void)snprintf(instr, sizeof(instr), "%s r%u, %d", s_op_name(op), (unsigned)ins.a, (int)ins.imm);
+
+          int64_t ins_target = (int64_t)i + (int64_t)ins.imm;
+          uint64_t pc_target = (uint64_t)pc + ((uint64_t)(int64_t)ins.imm * (uint64_t)sizeof(MiVmIns));
+          if (ins_target < 0 || (size_t)ins_target >= chunk->code_count)
+          {
+            (void)snprintf(comment, sizeof(comment), "-> 0x%08zx (OOB)", (size_t)pc_target);
+          }
+          else
+          {
+            (void)snprintf(comment, sizeof(comment), "-> 0x%08zx", (size_t)pc_target);
+          }
+        } break;
 
       case MI_VM_OP_RETURN:
         (void)snprintf(instr, sizeof(instr), "%s r%u", s_op_name(op), (unsigned)ins.a);
@@ -1961,14 +2567,8 @@ void mi_vm_disasm(const MiVmChunk* chunk)
     /* Special-case: ARG_PUSH_CONST must print value inline, not an index. */
     if (op == MI_VM_OP_ARG_PUSH_CONST)
     {
-      /* Print "ARG_PUSH_CONST <value>" into a fixed field, then comment */
-      char tmp[96];
-      tmp[0] = '\0';
-
       if (ins.imm >= 0 && (size_t)ins.imm < chunk->const_count)
       {
-        /* print into stdout via s_vm_print_value_inline but keep alignment:
-           we print into a temp string using existing s_vm_value_to_string if available. */
         char vbuf[64];
         vbuf[0] = '\0';
         s_vm_value_to_string(vbuf, sizeof(vbuf), &chunk->consts[(size_t)ins.imm]);
@@ -1980,8 +2580,6 @@ void mi_vm_disasm(const MiVmChunk* chunk)
         (void)snprintf(instr, sizeof(instr), "%s <oob>", s_op_name(op));
         (void)snprintf(comment, sizeof(comment), "<oob>");
       }
-
-      (void)tmp;
     }
 
     /* Print with fixed comment column */

@@ -9,6 +9,8 @@
 #include <stdx_arena.h>
 #include <stdx_string.h>
 
+#include "mi_heap.h"
+
 //----------------------------------------------------------
 // Runtime Values
 //----------------------------------------------------------
@@ -55,7 +57,7 @@ struct MiRtPair
 
 struct MiRtList
 {
-  XArena*    arena;
+  MiHeap*    heap;
   MiRtValue* items;
   size_t     count;
   size_t     capacity;
@@ -114,6 +116,8 @@ typedef struct MiRtUserCommand
 
 struct MiRuntime
 {
+  MiHeap           heap;
+
   MiScopeFrame      root;
   MiScopeFrame*     current;
   MiScopeFrame*     free_frames;
@@ -125,6 +129,21 @@ struct MiRuntime
 
   MiRtExecBlockFn   exec_block;
 };
+
+MiHeapStats mi_rt_heap_stats(const MiRuntime* rt);
+
+//----------------------------------------------------------
+// Refcount helpers
+//----------------------------------------------------------
+
+/* Retain a value if it owns a heap payload. */
+void mi_rt_value_retain(MiRuntime* rt, MiRtValue v);
+
+/* Release a value if it owns a heap payload. */
+void mi_rt_value_release(MiRuntime* rt, MiRtValue v);
+
+/* Assign into dst (release old, retain new). */
+void mi_rt_value_assign(MiRuntime* rt, MiRtValue* dst, MiRtValue src);
 
 //----------------------------------------------------------
 // Public API
@@ -207,7 +226,10 @@ MiRtList* mi_rt_list_create(MiRuntime* rt);
  * Create a new runtime pair.
  * @return Newly created pair.
  */
-MiRtPair* mi_rt_pair_create(void);
+MiRtPair* mi_rt_pair_create(MiRuntime* rt);
+
+/* Set an element in a pair (retains new, releases old). */
+void mi_rt_pair_set(MiRuntime* rt, MiRtPair* pair, int index, MiRtValue v);
 
 /**
  * Create a new runtime block.
