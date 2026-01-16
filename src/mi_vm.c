@@ -691,10 +691,6 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e, bool wants_
   uint8_t dst = s_alloc_reg(b);
   uint8_t argc = 0;
 
-  /* Start a fresh argument list for every call.
-     This also makes disassembly easier to read. */
-  s_chunk_emit(b->chunk, MI_VM_OP_ARG_CLEAR, 0, 0, 0, 0);
-
   /* Special form: set :: <lvalue> <value>
      Supports:
        set :: name value
@@ -1297,6 +1293,9 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e, bool wants_
 
     return dst;
   }
+
+  /* Regular command call: it uses the argument stack. */
+  s_chunk_emit(b->chunk, MI_VM_OP_ARG_CLEAR, 0, 0, 0, 0);
 
   const MiExprList* it = e->as.command.args;
   while (it)
