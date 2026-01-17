@@ -173,37 +173,107 @@ static MiRtValue s_vm_cmd_dict(MiVm* vm, int argc, const MiRtValue* argv)
 
   if (argc != 1)
   {
-    mi_error("dict: expected 1 argument (list of [k, v] entries)\n");
+    mi_error("dict: expected 1 argument\n");
+    return mi_rt_make_void();
+  }
+
+  /* Identity cast: dict:[k=v, ...] where the literal already produced a dict. */
+  if (argv[0].kind == MI_RT_VAL_DICT && argv[0].as.dict)
+  {
+    return argv[0];
+  }
+
+  /* Backwards compatibility: dict: (list of [k, v] entries). */
+  if (argv[0].kind == MI_RT_VAL_LIST && argv[0].as.list)
+  {
+    MiRtDict* d = mi_rt_dict_create(vm->rt);
+    if (!d)
+    {
+      return mi_rt_make_void();
+    }
+
+    MiRtList* entries = argv[0].as.list;
+    for (size_t i = 0u; i < entries->count; ++i)
+    {
+      MiRtValue kv = entries->items[i];
+      if (kv.kind != MI_RT_VAL_LIST || !kv.as.list || kv.as.list->count != 2u)
+      {
+        mi_error("dict: each entry must be a 2-element list [k, v]\n");
+        continue;
+      }
+      MiRtValue k = kv.as.list->items[0];
+      MiRtValue v = kv.as.list->items[1];
+      (void) mi_rt_dict_set(vm->rt, d, k, v);
+    }
+
+    return mi_rt_make_dict(d);
+  }
+
+  mi_error("dict: argument must be a dict literal or a list of [k, v] entries\n");
+  return mi_rt_make_void();
+}
+
+static MiRtValue s_vm_cmd_list(MiVm* vm, int argc, const MiRtValue* argv)
+{
+  (void)vm;
+
+  if (argc != 1)
+  {
+    mi_error("list: expected 1 argument\n");
     return mi_rt_make_void();
   }
 
   if (argv[0].kind != MI_RT_VAL_LIST || !argv[0].as.list)
   {
-    mi_error("dict: argument must be a list of [k, v] entries\n");
+    mi_error("list: argument must be a list\n");
     return mi_rt_make_void();
   }
 
-  MiRtDict* d = mi_rt_dict_create(vm->rt);
-  if (!d)
+  return argv[0];
+}
+
+static MiRtValue s_vm_cmd_len(MiVm* vm, int argc, const MiRtValue* argv)
+{
+  if (!vm || !vm->rt)
   {
     return mi_rt_make_void();
   }
 
-  MiRtList* entries = argv[0].as.list;
-  for (size_t i = 0u; i < entries->count; ++i)
+  if (argc != 1)
   {
-    MiRtValue kv = entries->items[i];
-    if (kv.kind != MI_RT_VAL_LIST || !kv.as.list || kv.as.list->count != 2u)
-    {
-      mi_error("dict: each entry must be a 2-element list [k, v]\n");
-      continue;
-    }
-    MiRtValue k = kv.as.list->items[0];
-    MiRtValue v = kv.as.list->items[1];
-    (void) mi_rt_dict_set(vm->rt, d, k, v);
+    mi_error("len: expected 1 argument\n");
+    return mi_rt_make_void();
   }
 
-  return mi_rt_make_dict(d);
+  MiRtValue v = argv[0];
+
+  if (v.kind == MI_RT_VAL_LIST && v.as.list)
+  {
+    return mi_rt_make_int((int64_t)v.as.list->count);
+  }
+
+  if (v.kind == MI_RT_VAL_PAIR && v.as.pair)
+  {
+    return mi_rt_make_int(2);
+  }
+
+  if (v.kind == MI_RT_VAL_DICT && v.as.dict)
+  {
+    return mi_rt_make_int((int64_t)mi_rt_dict_count(v.as.dict));
+  }
+
+  if (v.kind == MI_RT_VAL_KVREF)
+  {
+    return mi_rt_make_int(2);
+  }
+
+  if (v.kind == MI_RT_VAL_STRING && v.as.s.ptr)
+  {
+    return mi_rt_make_int((int64_t)v.as.s.length);
+  }
+
+  mi_error("len: unsupported type\n");
+  return mi_rt_make_void();
 }
 
 static MiRtValue s_vm_cmd_print(MiVm* vm, int argc, const MiRtValue* argv)
@@ -329,7 +399,9 @@ void mi_vm_init(MiVm* vm, MiRuntime* rt)
   (void) mi_vm_register_command(vm, x_slice_from_cstr("print"), s_vm_cmd_print);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("set"),   s_vm_cmd_set);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("call"),  s_vm_cmd_call);
+  (void) mi_vm_register_command(vm, x_slice_from_cstr("list"),  s_vm_cmd_list);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("dict"),  s_vm_cmd_dict);
+  (void) mi_vm_register_command(vm, x_slice_from_cstr("len"),   s_vm_cmd_len);
 }
 
 void mi_vm_shutdown(MiVm* vm)
@@ -1680,6 +1752,9 @@ MiVmChunk* mi_vm_compile_script(MiVm* vm, XSlice source)
     (void) mi_vm_register_command(vm, x_slice_from_cstr("print"), s_vm_cmd_print);
     (void) mi_vm_register_command(vm, x_slice_from_cstr("set"),   s_vm_cmd_set);
     (void) mi_vm_register_command(vm, x_slice_from_cstr("call"),  s_vm_cmd_call);
+    (void) mi_vm_register_command(vm, x_slice_from_cstr("list"),  s_vm_cmd_list);
+    (void) mi_vm_register_command(vm, x_slice_from_cstr("dict"),  s_vm_cmd_dict);
+    (void) mi_vm_register_command(vm, x_slice_from_cstr("len"),   s_vm_cmd_len);
   }
 
   XArena* arena = x_arena_create(1024 * 64);
