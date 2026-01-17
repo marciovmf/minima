@@ -40,6 +40,17 @@ typedef enum MiVmOp
   // Lists
   MI_VM_OP_LIST_NEW,    // a = new list
   MI_VM_OP_LIST_PUSH,   // regs[a].list push regs[b]
+  // Dicts
+  MI_VM_OP_DICT_NEW,    // a = new dict
+
+  /* Iteration (cursor-based, no heap iterator objects)
+     - regs[c] is an int cursor (start at -1)
+     - regs[a] receives bool has_next
+     - imm low 8 bits contains dst_item register
+     - For lists: item = list[cursor]
+     - For dicts: item = KVREF (virtual 2-elem view)
+  */
+  MI_VM_OP_ITER_NEXT,
   // Indexing
   MI_VM_OP_INDEX,       // a = regs[b][regs[c]]
   MI_VM_OP_STORE_INDEX, // regs[a][regs[b]] = regs[c]
@@ -64,6 +75,7 @@ typedef enum MiVmOp
   // Vars
   MI_VM_OP_LOAD_VAR,          // a = $sym[imm]
   MI_VM_OP_STORE_VAR,         // $sym[imm] = a
+  MI_VM_OP_DEFINE_VAR,        // define $sym[imm] = a in current scope only
   MI_VM_OP_LOAD_INDIRECT_VAR, // a = $( regs[b] )
                               // Args + command calls
   MI_VM_OP_ARG_CLEAR,         // clear arg stack

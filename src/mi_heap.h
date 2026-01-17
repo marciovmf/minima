@@ -15,6 +15,7 @@ typedef enum MiObjKind
   MI_OBJ_INVALID = 0,
   MI_OBJ_LIST,
   MI_OBJ_PAIR,
+  MI_OBJ_DICT,
   MI_OBJ_BLOCK,
   MI_OBJ_BUFFER
 } MiObjKind;

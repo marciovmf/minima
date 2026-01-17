@@ -19,8 +19,15 @@ typedef struct MiRuntime MiRuntime;
 typedef struct MiRtValue MiRtValue;
 typedef struct MiRtList MiRtList;
 typedef struct MiRtPair MiRtPair;
+typedef struct MiRtDict MiRtDict;
 typedef struct MiRtBlock MiRtBlock;
 typedef struct MiScopeFrame MiScopeFrame;
+
+typedef struct MiRtKvRef
+{
+  MiRtDict* dict;
+  size_t    entry_index;
+} MiRtKvRef;
 
 typedef enum MiRtValueKind
 {
@@ -30,6 +37,8 @@ typedef enum MiRtValueKind
   MI_RT_VAL_BOOL,
   MI_RT_VAL_STRING,
   MI_RT_VAL_LIST,
+  MI_RT_VAL_DICT,
+  MI_RT_VAL_KVREF,
   MI_RT_VAL_BLOCK,
   MI_RT_VAL_PAIR
 } MiRtValueKind;
@@ -46,8 +55,26 @@ struct MiRtValue
     XSlice     s;
     MiRtPair*  pair;
     MiRtList*  list;
+    MiRtDict*  dict;
+    MiRtKvRef   kvref;
     MiRtBlock* block;
   } as;
+};
+
+typedef struct MiRtDictEntry
+{
+  MiRtValue key;
+  MiRtValue value;
+  uint8_t   state; /* 0 = empty, 1 = filled, 2 = tombstone */
+} MiRtDictEntry;
+
+struct MiRtDict
+{
+  MiHeap*         heap;
+  MiRtDictEntry*  entries;
+  size_t          count;
+  size_t          tombstones;
+  size_t          capacity;
 };
 
 struct MiRtPair
@@ -209,6 +236,17 @@ bool mi_rt_var_get(const MiRuntime* rt, XSlice name, MiRtValue* out_value);
 bool mi_rt_var_set(MiRuntime* rt, XSlice name, MiRtValue value);
 
 /**
+ * Define a variable in the current scope only.
+ * If the variable already exists in the current scope, it is updated.
+ * Unlike mi_rt_var_set(), this function never searches parent scopes.
+ * @param rt    Runtime instance.
+ * @param name  Variable name.
+ * @param value Value to assign.
+ * @return      True on success.
+ */
+bool mi_rt_var_define(MiRuntime* rt, XSlice name, MiRtValue value);
+
+/**
  * Set the backend hook used to execute runtime blocks.
  * @param rt Runtime instance.
  * @param fn Block execution function.
@@ -221,6 +259,33 @@ void mi_rt_set_exec_block(MiRuntime* rt, MiRtExecBlockFn fn);
  * @return   Newly created list.
  */
 MiRtList* mi_rt_list_create(MiRuntime* rt);
+
+/**
+ * Create a new runtime dictionary.
+ * @param rt Runtime instance.
+ * @return   Newly created dictionary.
+ */
+MiRtDict* mi_rt_dict_create(MiRuntime* rt);
+
+/* Set a key/value pair (retains new key/value, releases overwritten value). */
+bool mi_rt_dict_set(MiRuntime* rt, MiRtDict* dict, MiRtValue key, MiRtValue value);
+
+/* Get a value by key. Returns false if not found. */
+bool mi_rt_dict_get(const MiRtDict* dict, MiRtValue key, MiRtValue* out_value);
+
+/* Remove a key from the dict (releases key/value). Returns false if not found. */
+bool mi_rt_dict_remove(MiRuntime* rt, MiRtDict* dict, MiRtValue key);
+
+/* Number of entries in the dict. */
+size_t mi_rt_dict_count(const MiRtDict* dict);
+
+typedef struct MiRtDictIter
+{
+  size_t index;
+} MiRtDictIter;
+
+/* Iterate over dict entries (borrowed keys/values; no allocation). */
+bool mi_rt_dict_iter_next(const MiRtDict* dict, MiRtDictIter* it, MiRtValue* out_key, MiRtValue* out_value);
 
 /**
  * Create a new runtime pair.
@@ -287,6 +352,22 @@ MiRtValue mi_rt_make_string_slice(XSlice s);
  * @return     List runtime value.
  */
 MiRtValue mi_rt_make_list(MiRtList* list);
+
+/**
+ * Create a dict runtime value.
+ * @param dict Dict object.
+ * @return     Dict runtime value.
+ */
+MiRtValue mi_rt_make_dict(MiRtDict* dict);
+
+/**
+ * Create a KVREF runtime value (virtual 2-element view for dict iteration).
+ * This value is not user-constructible from Minima syntax.
+ * @param dict        Dict object.
+ * @param entry_index Index into dict entries array.
+ * @return            KVREF runtime value.
+ */
+MiRtValue mi_rt_make_kvref(MiRtDict* dict, size_t entry_index);
 
 /**
  * Create a pair runtime value.

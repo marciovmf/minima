@@ -66,6 +66,7 @@ static void* s_value_payload_ptr(MiRtValue v)
   switch (v.kind)
   {
     case MI_RT_VAL_LIST:  return (void*)v.as.list;
+    case MI_RT_VAL_DICT:  return (void*)v.as.dict;
     case MI_RT_VAL_PAIR:  return (void*)v.as.pair;
     case MI_RT_VAL_BLOCK: return (void*)v.as.block;
     default:              return NULL;
@@ -92,6 +93,29 @@ static void s_value_pre_destroy(MiRuntime* rt, MiRtValue v)
       list->items = NULL;
       list->count = 0u;
       list->capacity = 0u;
+    }
+  }
+  else if (v.kind == MI_RT_VAL_DICT && v.as.dict)
+  {
+    MiRtDict* d = v.as.dict;
+
+    if (d->entries)
+    {
+      for (size_t i = 0u; i < d->capacity; ++i)
+      {
+        MiRtDictEntry* e = &d->entries[i];
+        if (e->state == 1u)
+        {
+          mi_rt_value_release(rt, e->key);
+          mi_rt_value_release(rt, e->value);
+        }
+      }
+
+      mi_heap_release_payload(&rt->heap, d->entries);
+      d->entries = NULL;
+      d->capacity = 0u;
+      d->count = 0u;
+      d->tombstones = 0u;
     }
   }
   else if (v.kind == MI_RT_VAL_PAIR && v.as.pair)
@@ -389,6 +413,35 @@ bool mi_rt_var_set(MiRuntime* rt, XSlice name, MiRtValue value)
   return true;
 }
 
+bool mi_rt_var_define(MiRuntime* rt, XSlice name, MiRtValue value)
+{
+  if (!rt || !rt->current)
+  {
+    return false;
+  }
+
+  MiRtVar* v = s_var_find_in_frame(rt->current, name);
+  if (v)
+  {
+    mi_rt_value_assign(rt, &v->value, value);
+    return true;
+  }
+
+  v = (MiRtVar*)x_arena_alloc(rt->current->arena, sizeof(MiRtVar));
+  if (!v)
+  {
+    mi_error("mi_runtime: out of memory\n");
+    exit(1);
+  }
+
+  v->name = name;
+  v->value = mi_rt_make_void();
+  mi_rt_value_assign(rt, &v->value, value);
+  v->next = rt->current->vars;
+  rt->current->vars = v;
+  return true;
+}
+
 void mi_rt_set_exec_block(MiRuntime* rt, MiRtExecBlockFn fn)
 {
   if (!rt)
@@ -422,6 +475,367 @@ MiRtList* mi_rt_list_create(MiRuntime* rt)
   list->capacity = 0u;
 
   return list;
+}
+
+//----------------------------------------------------------
+// Dict implementation
+//----------------------------------------------------------
+
+static uint64_t s_hash_u64(uint64_t x)
+{
+  /* SplitMix64 mix (public domain). */
+  x = (x ^ (x >> 30u)) * 0xbf58476d1ce4e5b9ULL;
+  x = (x ^ (x >> 27u)) * 0x94d049bb133111ebULL;
+  return x ^ (x >> 31u);
+}
+
+static uint64_t s_hash_bytes(const void* data, size_t len)
+{
+  const uint8_t* p = (const uint8_t*)data;
+  uint64_t h = 1469598103934665603ULL; /* FNV-1a 64 */
+  for (size_t i = 0u; i < len; ++i)
+  {
+    h = h ^ (uint64_t)p[i];
+    h = h * 1099511628211ULL;
+  }
+  return h;
+}
+
+static uint64_t s_hash_value(MiRtValue v)
+{
+  switch (v.kind)
+  {
+    case MI_RT_VAL_VOID:
+      return 0u;
+    case MI_RT_VAL_BOOL:
+      return s_hash_u64(v.as.b ? 1u : 0u);
+    case MI_RT_VAL_INT:
+      return s_hash_u64((uint64_t)v.as.i);
+    case MI_RT_VAL_FLOAT:
+      {
+        uint64_t bits = 0u;
+        memcpy(&bits, &v.as.f, sizeof(bits));
+        return s_hash_u64(bits);
+      }
+    case MI_RT_VAL_STRING:
+      {
+        if (!v.as.s.ptr)
+        {
+          return 0u;
+        }
+        uint64_t h = s_hash_bytes(v.as.s.ptr, v.as.s.length);
+        return s_hash_u64(h ^ (uint64_t)v.as.s.length);
+      }
+    case MI_RT_VAL_LIST:
+      return s_hash_u64((uint64_t)(uintptr_t)v.as.list);
+    case MI_RT_VAL_DICT:
+      return s_hash_u64((uint64_t)(uintptr_t)v.as.dict);
+    case MI_RT_VAL_KVREF:
+      {
+        uint64_t a = (uint64_t)(uintptr_t)v.as.kvref.dict;
+        uint64_t b = (uint64_t)v.as.kvref.entry_index;
+        return s_hash_u64(a ^ s_hash_u64(b + 0x9E3779B97F4A7C15ULL));
+      }
+    case MI_RT_VAL_BLOCK:
+      return s_hash_u64((uint64_t)(uintptr_t)v.as.block);
+    case MI_RT_VAL_PAIR:
+      return s_hash_u64((uint64_t)(uintptr_t)v.as.pair);
+    default:
+      return 0u;
+  }
+}
+
+static bool s_value_key_eq(MiRtValue a, MiRtValue b)
+{
+  if (a.kind != b.kind)
+  {
+    return false;
+  }
+
+  switch (a.kind)
+  {
+    case MI_RT_VAL_VOID:
+      return true;
+    case MI_RT_VAL_BOOL:
+      return a.as.b == b.as.b;
+    case MI_RT_VAL_INT:
+      return a.as.i == b.as.i;
+    case MI_RT_VAL_FLOAT:
+      {
+        uint64_t aa = 0u;
+        uint64_t bb = 0u;
+        memcpy(&aa, &a.as.f, sizeof(aa));
+        memcpy(&bb, &b.as.f, sizeof(bb));
+        return aa == bb;
+      }
+    case MI_RT_VAL_STRING:
+      return x_slice_eq(a.as.s, b.as.s);
+    case MI_RT_VAL_LIST:
+      return a.as.list == b.as.list;
+    case MI_RT_VAL_DICT:
+      return a.as.dict == b.as.dict;
+    case MI_RT_VAL_KVREF:
+      return a.as.kvref.dict == b.as.kvref.dict && a.as.kvref.entry_index == b.as.kvref.entry_index;
+    case MI_RT_VAL_BLOCK:
+      return a.as.block == b.as.block;
+    case MI_RT_VAL_PAIR:
+      return a.as.pair == b.as.pair;
+    default:
+      return false;
+  }
+}
+
+static size_t s_next_pow2(size_t x)
+{
+  size_t p = 1u;
+  while (p < x)
+  {
+    p = p << 1u;
+  }
+  return p;
+}
+
+static bool s_dict_grow(MiRuntime* rt, MiRtDict* d, size_t new_capacity)
+{
+  if (!rt || !d)
+  {
+    return false;
+  }
+
+  if (new_capacity < 8u)
+  {
+    new_capacity = 8u;
+  }
+
+  new_capacity = s_next_pow2(new_capacity);
+
+  MiRtDictEntry* new_entries = (MiRtDictEntry*)mi_heap_alloc_buffer(&rt->heap, new_capacity * sizeof(MiRtDictEntry));
+  if (!new_entries)
+  {
+    return false;
+  }
+  memset(new_entries, 0, new_capacity * sizeof(MiRtDictEntry));
+
+  MiRtDictEntry* old_entries = d->entries;
+  size_t old_cap = d->capacity;
+
+  d->entries = new_entries;
+  d->capacity = new_capacity;
+  d->count = 0u;
+  d->tombstones = 0u;
+
+  if (old_entries && old_cap)
+  {
+    for (size_t i = 0u; i < old_cap; ++i)
+    {
+      MiRtDictEntry* e = &old_entries[i];
+      if (e->state != 1u)
+      {
+        continue;
+      }
+
+      /* Reinsert without retain/release: ownership stays in the dict. */
+      uint64_t h = s_hash_value(e->key);
+      size_t mask = d->capacity - 1u;
+      size_t idx = (size_t)h & mask;
+      while (d->entries[idx].state == 1u)
+      {
+        idx = (idx + 1u) & mask;
+      }
+      d->entries[idx] = *e;
+      d->entries[idx].state = 1u;
+      d->count++;
+    }
+
+    mi_heap_release_payload(&rt->heap, old_entries);
+  }
+
+  return true;
+}
+
+MiRtDict* mi_rt_dict_create(MiRuntime* rt)
+{
+  if (!rt)
+  {
+    return NULL;
+  }
+
+  MiRtDict* d = (MiRtDict*)mi_heap_alloc_obj(&rt->heap, MI_OBJ_DICT, sizeof(MiRtDict));
+  if (!d)
+  {
+    mi_error("mi_runtime: out of memory\n");
+    exit(1);
+  }
+
+  d->heap = &rt->heap;
+  d->entries = NULL;
+  d->count = 0u;
+  d->tombstones = 0u;
+  d->capacity = 0u;
+
+  (void)s_dict_grow(rt, d, 8u);
+  return d;
+}
+
+bool mi_rt_dict_set(MiRuntime* rt, MiRtDict* d, MiRtValue key, MiRtValue value)
+{
+  if (!rt || !d)
+  {
+    return false;
+  }
+
+  if (!d->entries || d->capacity == 0u)
+  {
+    if (!s_dict_grow(rt, d, 8u))
+    {
+      return false;
+    }
+  }
+
+  /* Grow if load factor (including tombstones) gets high. */
+  size_t used = d->count + d->tombstones;
+  if (used * 4u >= d->capacity * 3u)
+  {
+    (void)s_dict_grow(rt, d, d->capacity ? d->capacity * 2u : 8u);
+  }
+
+  uint64_t h = s_hash_value(key);
+  size_t mask = d->capacity - 1u;
+  size_t idx = (size_t)h & mask;
+  size_t first_tomb = (size_t)(~0u);
+
+  while (true)
+  {
+    MiRtDictEntry* e = &d->entries[idx];
+    if (e->state == 0u)
+    {
+      if (first_tomb != (size_t)(~0u))
+      {
+        e = &d->entries[first_tomb];
+        d->tombstones--;
+      }
+
+      e->state = 1u;
+      e->key = mi_rt_make_void();
+      e->value = mi_rt_make_void();
+      mi_rt_value_assign(rt, &e->key, key);
+      mi_rt_value_assign(rt, &e->value, value);
+      d->count++;
+      return true;
+    }
+    else if (e->state == 2u)
+    {
+      if (first_tomb == (size_t)(~0u))
+      {
+        first_tomb = idx;
+      }
+    }
+    else if (e->state == 1u)
+    {
+      if (s_value_key_eq(e->key, key))
+      {
+        mi_rt_value_assign(rt, &e->value, value);
+        return true;
+      }
+    }
+
+    idx = (idx + 1u) & mask;
+  }
+}
+
+bool mi_rt_dict_get(const MiRtDict* d, MiRtValue key, MiRtValue* out_value)
+{
+  if (!d || !d->entries || d->capacity == 0u)
+  {
+    return false;
+  }
+
+  uint64_t h = s_hash_value(key);
+  size_t mask = d->capacity - 1u;
+  size_t idx = (size_t)h & mask;
+
+  while (true)
+  {
+    const MiRtDictEntry* e = &d->entries[idx];
+    if (e->state == 0u)
+    {
+      return false;
+    }
+    if (e->state == 1u && s_value_key_eq(e->key, key))
+    {
+      if (out_value)
+      {
+        *out_value = e->value;
+      }
+      return true;
+    }
+    idx = (idx + 1u) & mask;
+  }
+}
+
+bool mi_rt_dict_remove(MiRuntime* rt, MiRtDict* d, MiRtValue key)
+{
+  if (!rt || !d || !d->entries || d->capacity == 0u)
+  {
+    return false;
+  }
+
+  uint64_t h = s_hash_value(key);
+  size_t mask = d->capacity - 1u;
+  size_t idx = (size_t)h & mask;
+
+  while (true)
+  {
+    MiRtDictEntry* e = &d->entries[idx];
+    if (e->state == 0u)
+    {
+      return false;
+    }
+    if (e->state == 1u && s_value_key_eq(e->key, key))
+    {
+      mi_rt_value_release(rt, e->key);
+      mi_rt_value_release(rt, e->value);
+      e->key = mi_rt_make_void();
+      e->value = mi_rt_make_void();
+      e->state = 2u;
+      d->count--;
+      d->tombstones++;
+      return true;
+    }
+    idx = (idx + 1u) & mask;
+  }
+}
+
+size_t mi_rt_dict_count(const MiRtDict* d)
+{
+  return d ? d->count : 0u;
+}
+
+bool mi_rt_dict_iter_next(const MiRtDict* d, MiRtDictIter* it, MiRtValue* out_key, MiRtValue* out_value)
+{
+  if (!d || !it || !d->entries)
+  {
+    return false;
+  }
+
+  while (it->index < d->capacity)
+  {
+    const MiRtDictEntry* e = &d->entries[it->index++];
+    if (e->state == 1u)
+    {
+      if (out_key)
+      {
+        *out_key = e->key;
+      }
+      if (out_value)
+      {
+        *out_value = e->value;
+      }
+      return true;
+    }
+  }
+
+  return false;
 }
 
 MiRtPair* mi_rt_pair_create(MiRuntime* rt)
@@ -557,6 +971,23 @@ MiRtValue mi_rt_make_list(MiRtList* list)
   MiRtValue out;
   out.kind = MI_RT_VAL_LIST;
   out.as.list = list;
+  return out;
+}
+
+MiRtValue mi_rt_make_dict(MiRtDict* dict)
+{
+  MiRtValue out;
+  out.kind = MI_RT_VAL_DICT;
+  out.as.dict = dict;
+  return out;
+}
+
+MiRtValue mi_rt_make_kvref(MiRtDict* dict, size_t entry_index)
+{
+  MiRtValue out;
+  out.kind = MI_RT_VAL_KVREF;
+  out.as.kvref.dict = dict;
+  out.as.kvref.entry_index = entry_index;
   return out;
 }
 

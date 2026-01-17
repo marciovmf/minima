@@ -39,6 +39,7 @@ typedef enum MiTokenKind
   MI_TOK_MINUS,       // - 
   MI_TOK_STAR,        // * 
   MI_TOK_SLASH,       // / 
+  MI_TOK_EQ,          // =
   MI_TOK_EQEQ,        // ==
   MI_TOK_BANGEQ,      // !=
   MI_TOK_LT,          // < 
@@ -95,10 +96,10 @@ typedef enum MiExprKind
   MI_EXPR_UNARY,
   MI_EXPR_BINARY,
   MI_EXPR_LIST,             // [a, b, c]
-  MI_EXPR_DICT,             // ["k":v, ...]
-  MI_EXPR_PAIR,             // "k": v 
+  MI_EXPR_DICT,             // [k = v, ...]  (pairs are only valid inside dict literals)
+  MI_EXPR_PAIR,             // k = v (only produced inside dict literals)
   MI_EXPR_BLOCK,            // { script }
-MI_EXPR_COMMAND             // head_expr :: arg_expr*  (when used in an expression)
+  MI_EXPR_COMMAND            // head_expr : arg_expr*  (when used in an expression)
 } MiExprKind;
 
 typedef struct MiExpr

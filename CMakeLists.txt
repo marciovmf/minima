@@ -21,17 +21,17 @@ endfunction()
 set(STDX_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/src/include")
 
 list(APPEND SOURCES 
-  src/mi_bytecode.c
-  src/mi_compile.c
-  src/mi_parse.c
-  src/mi_eval_ast.c
-  src/mi_runtime.c
-  src/mi_heap.c
-  src/mi_vm.c
-  src/main.c)
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_bytecode.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_compile.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_parse.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_eval_ast.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_runtime.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_heap.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_vm.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/main.c)
 
 if(MSVC)
-  configure_file(src/version.rc.in src/version.rc)
+  configure_file(src/version.rc.in ${CMAKE_CURRENT_LIST_DIR}/src/version.rc)
   list(APPEND SOURCES src/version.rc)
 endif()
 

@@ -206,8 +206,9 @@ static MiToken s_lexer_next(MiLexer *lx)
                {
                  if (s_lexer_peek(lx) == ':')
                  {
+                   // '::' is no longer a valid command separator.
                    s_lexer_advance(lx);
-                   return s_make_token(MI_TOK_DOUBLE_COLON, start, 2, line, column);
+                   return s_make_token(MI_TOK_ERROR, start, 2, line, column);
                  }
                  return s_make_token(MI_TOK_COLON, start, 1, line, column);
                }
@@ -223,7 +224,7 @@ static MiToken s_lexer_next(MiLexer *lx)
                  s_lexer_advance(lx);
                  return s_make_token(MI_TOK_EQEQ, start, 2, line, column);
                }
-               break;
+               return s_make_token(MI_TOK_EQ, start, 1, line, column);
 
     case '!' :
                if (s_lexer_peek(lx) == '=')
@@ -388,7 +389,6 @@ static void s_parser_init(MiParser *p,
 static MiScript   *s_parse_script(MiParser *p, bool stop_at_rbrace);
 static MiCommand  *s_parse_command(MiParser *p);
 static MiExpr     *s_parse_expr(MiParser *p);
-static MiExpr     *s_parse_pair(MiParser *p);
 static MiExpr     *s_parse_or(MiParser *p);
 static MiExpr     *s_parse_and(MiParser *p);
 static MiExpr     *s_parse_equality(MiParser *p);
@@ -651,11 +651,11 @@ static MiCommand* s_parse_command(MiParser *p)
     return NULL;
   }
 
-  // On script level expression MUST be a command lie name_expression :: args
+  // On script level expression MUST be a command like head_expr : arg_expr*
   if (expr->kind != MI_EXPR_COMMAND)
   {
     s_parser_set_error(p,
-        "Expected 'head_expr :: arg_expr*' command",
+        "Expected 'head_expr : arg_expr*' command",
         expr->token);
     return NULL;
   }
@@ -680,11 +680,11 @@ static bool s_tokens_adjacent(const MiToken *a, const MiToken *b)
 }
 
 /**
- * expr ::= pair_expr
+ * expr ::= or_expr
  */
 static MiExpr* s_parse_expr(MiParser *p)
 {
-  return s_parse_pair(p);
+  return s_parse_or(p);
 }
 
 /**
@@ -703,40 +703,7 @@ static MiExpr* s_parse_expr_core(MiParser *p)
 }
 
 /**
- * pair_expr ::= or_expr ( ":" expr )?
- */
-static MiExpr* s_parse_pair(MiParser *p)
-{
-  MiExpr *left = s_parse_or(p);
-  if (!left)
-  {
-    return NULL;
-  }
-
-  if (s_parser_peek(p).kind == MI_TOK_COLON)
-  {
-    MiToken colon = s_parser_advance(p);
-    MiExpr *right = s_parse_expr(p);
-    if (!right)
-    {
-      return NULL;
-    }
-
-    MiExpr *pair = s_new_expr(p, MI_EXPR_PAIR, colon, false);
-    if (!pair)
-    {
-      return NULL;
-    }
-    pair->as.pair.key   = left;
-    pair->as.pair.value = right;
-    return pair;
-  }
-
-  return left;
-}
-
-/**
- * postfix_expr ::= primary_expr ("[" expr "]")* ("::" arg_expr*)?
+ * postfix_expr ::= primary_expr ("[" expr "]")* (":" arg_expr*)?
  */
 static MiExpr* s_parse_postfix(MiParser *p)
 {
@@ -759,6 +726,22 @@ static MiExpr* s_parse_postfix(MiParser *p)
       {
         // If there is space between expr and [] this isn't indexing. Stop!
         break;
+      }
+
+      // ident[expr] is a strong signal that 'ident' refers to a variable.
+      // Bare identifiers normally parse as string literals, but for indexing
+      // we reinterpret them as a variable reference to avoid requiring $.
+      if (expr->kind == MI_EXPR_STRING_LITERAL && expr->token.kind == MI_TOK_IDENTIFIER)
+      {
+        MiExpr *v = s_new_expr(p, MI_EXPR_VAR, expr->token, false);
+        if (!v)
+        {
+          return NULL;
+        }
+        v->as.var.is_indirect = false;
+        v->as.var.name = expr->as.string_lit.value;
+        v->as.var.name_expr = NULL;
+        expr = v;
       }
 
       // indexing: expr[index]
@@ -801,8 +784,8 @@ static MiExpr* s_parse_postfix(MiParser *p)
     break;
   }
 
-  // Command call from inside the expression: head_expr :: arg_expr*
-  if (s_parser_peek(p).kind == MI_TOK_DOUBLE_COLON)
+  // Command call from inside the expression: head_expr : arg_expr*
+  if (s_parser_peek(p).kind == MI_TOK_COLON)
   {
     unsigned int argc = 0;
     MiToken colon_tok = s_parser_advance(p);
@@ -1132,7 +1115,7 @@ static MiExpr* s_parse_unary(MiParser *p)
   return s_parse_postfix(p);
 }
 
-/** list_or_dict ::= '[' ( expression ( ',' expression )* )? ']' | '{' ( pair ( ',' pair )* )? '}' */
+/** list_literal ::= '[' ( expression ( ',' expression )* )? ']' */
 static MiExpr* s_parse_list_or_dict(MiParser *p)
 {
   // '[' was already consumed
@@ -1142,6 +1125,28 @@ static MiExpr* s_parse_list_or_dict(MiParser *p)
 
   // right after '[' empty lines are allowed
   s_skip_newlines_for_group(p);
+
+  // Empty dict marker: [=]
+  if (s_parser_peek(p).kind == MI_TOK_EQ)
+  {
+    s_parser_advance(p); // '='
+
+    // allow empty lines before ']'
+    s_skip_newlines_for_group(p);
+
+    if (!s_parser_expect(p, MI_TOK_RBRACKET, "Expected ']' after '=' in empty dict literal"))
+    {
+      return NULL;
+    }
+
+    MiExpr *dict = s_new_expr(p, MI_EXPR_DICT, lbrack, true);
+    if (!dict)
+    {
+      return NULL;
+    }
+    dict->as.dict.items = NULL;
+    return dict;
+  }
 
   if (s_parser_peek(p).kind == MI_TOK_RBRACKET)
   {
@@ -1155,54 +1160,121 @@ static MiExpr* s_parse_list_or_dict(MiParser *p)
     return list;
   }
 
-  bool all_pairs = true;
   bool can_fold = true;
 
-  for (;;)
+  // Parse first element, then decide list vs dict by looking for '='
+  MiExpr *first = s_parse_expr(p);
+  if (!first)
   {
-    MiExpr *first = s_parse_expr(p);
-    if (!first)
-    {
-      return NULL;
-    }
+    return NULL;
+  }
 
-    MiExpr *elem_expr = NULL;
+  // Empty lines are allowed right after first expression
+  s_skip_newlines_for_group(p);
 
-    // try matching "key : value"
-    if (s_parser_peek(p).kind == MI_TOK_COLON)
+  if (s_parser_peek(p).kind == MI_TOK_EQ)
+  {
+    // Dict literal: [k = v, ...]
+    MiExprList *pairs = NULL;
+
+    for (;;)
     {
-      MiToken colon = s_parser_advance(p);
-      MiExpr *second = s_parse_expr(p);
-      if (!second)
+      MiExpr *key = first;
+      can_fold &= key->can_fold;
+
+      s_parser_advance(p); // '='
+
+      // allow empty lines after '='
+      s_skip_newlines_for_group(p);
+
+      MiExpr *value = s_parse_expr(p);
+      if (!value)
       {
         return NULL;
       }
+      can_fold &= value->can_fold;
 
-      MiExpr *pair = s_new_expr(p, MI_EXPR_PAIR, colon, false);
+      MiExpr *pair = s_new_expr(p, MI_EXPR_PAIR, lbrack, false);
       if (!pair)
       {
         return NULL;
       }
-      pair->as.pair.key   = first;
-      pair->as.pair.value = second;
-      elem_expr = pair;
-      can_fold &= (first->can_fold & second->can_fold);
+      pair->as.pair.key = key;
+      pair->as.pair.value = value;
 
+      pairs = s_expr_list_append(p, pairs, pair);
+      if (!pairs)
+      {
+        return NULL;
+      }
+
+      // Empty lines are allowed right before ',' or ']'
+      s_skip_newlines_for_group(p);
+
+      if (s_parser_peek(p).kind == MI_TOK_COMMA)
+      {
+        s_parser_advance(p); // ','
+
+        // allow empty lines after ','
+        s_skip_newlines_for_group(p);
+
+        if (s_parser_peek(p).kind == MI_TOK_RBRACKET)
+        {
+          // optional dangling ','
+          break;
+        }
+
+        first = s_parse_expr(p);
+        if (!first)
+        {
+          return NULL;
+        }
+
+        // Empty lines are allowed right after key
+        s_skip_newlines_for_group(p);
+
+        MiToken next_tok = s_parser_peek(p);
+        if (next_tok.kind != MI_TOK_EQ)
+        {
+          s_parser_set_error(p, "Mixed list/dict literal: expected '=' after key in dict literal", next_tok);
+          return NULL;
+        }
+
+        continue;
+      }
+
+      break;
     }
-    else
-    {
-      elem_expr = first;
-      all_pairs = false;
-      can_fold &= first->can_fold;
-    }
 
-    items = s_expr_list_append(p, items, elem_expr);
+    // right before ']' empty lines are allowed
+    s_skip_newlines_for_group(p);
 
-    if (!items)
+    if (!s_parser_expect(p, MI_TOK_RBRACKET, "Expected ']' to close dict literal"))
     {
       return NULL;
     }
 
+    MiExpr *expr = s_new_expr(p, MI_EXPR_DICT, lbrack, false);
+    if (!expr)
+    {
+      return NULL;
+    }
+
+    expr->as.dict.items = pairs;
+    expr->can_fold = can_fold;
+    return expr;
+  }
+
+  // List literal: [a, b, c]
+  items = s_expr_list_append(p, items, first);
+  if (!items)
+  {
+    return NULL;
+  }
+  can_fold &= first->can_fold;
+
+  for (;;)
+  {
     // Empty lines are allowed right before ',' or ']'
     s_skip_newlines_for_group(p);
 
@@ -1218,12 +1290,34 @@ static MiExpr* s_parse_list_or_dict(MiParser *p)
         // optional dangling ','
         break;
       }
+
+      MiExpr *next = s_parse_expr(p);
+      if (!next)
+      {
+        return NULL;
+      }
+
+      // Dict entries are not allowed in list literals.
+      s_skip_newlines_for_group(p);
+
+      MiToken next_tok = s_parser_peek(p);
+      if (next_tok.kind == MI_TOK_EQ)
+      {
+        s_parser_set_error(p, "Mixed list/dict literal: unexpected '=' in list literal", next_tok);
+        return NULL;
+      }
+
+      can_fold &= next->can_fold;
+      items = s_expr_list_append(p, items, next);
+      if (!items)
+      {
+        return NULL;
+      }
+
       continue;
     }
-    else
-    {
-      break;
-    }
+
+    break;
   }
 
   // right before ']' empty lines are allowed
@@ -1234,20 +1328,13 @@ static MiExpr* s_parse_list_or_dict(MiParser *p)
     return NULL;
   }
 
-  MiExpr *expr = s_new_expr(p, all_pairs ? MI_EXPR_DICT : MI_EXPR_LIST, lbrack, false);
+  MiExpr *expr = s_new_expr(p, MI_EXPR_LIST, lbrack, false);
   if (!expr)
   {
     return NULL;
   }
 
-  if (all_pairs)
-  {
-    expr->as.dict.items = items;
-  }
-  else
-  {
-    expr->as.list.items = items;
-  }
+  expr->as.list.items = items;
 
   expr->can_fold = can_fold;
 

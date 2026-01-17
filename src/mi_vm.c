@@ -88,6 +88,18 @@ static void s_vm_print_value_inline_depth(const MiRtValue* v, int depth)
     case MI_RT_VAL_FLOAT:  printf("%g", v->as.f); break;
     case MI_RT_VAL_BOOL:   printf("%s", v->as.b ? "true" : "false"); break;
     case MI_RT_VAL_STRING: printf("%.*s", (int)v->as.s.length, v->as.s.ptr); break;
+    case MI_RT_VAL_DICT:
+    {
+      const MiRtDict* d = v->as.dict;
+      printf("[dict");
+      if (d)
+      {
+        printf(" %zu", mi_rt_dict_count(d));
+      }
+      printf("]");
+      break;
+    }
+    case MI_RT_VAL_KVREF:  printf("<kvref>"); break;
     case MI_RT_VAL_BLOCK:  printf("{...}"); break;
     case MI_RT_VAL_PAIR:   printf("<pair>"); break;
 
@@ -144,10 +156,54 @@ static void s_vm_value_to_string(char* out, size_t cap, const MiRtValue* v)
     case MI_RT_VAL_BOOL:   (void)snprintf(out, cap, "%s", v->as.b ? "true" : "false"); break;
     case MI_RT_VAL_STRING: (void)snprintf(out, cap, "%.*s", (int)v->as.s.length, v->as.s.ptr); break;
     case MI_RT_VAL_LIST:   (void)snprintf(out, cap, "[list]"); break;
+    case MI_RT_VAL_DICT:   (void)snprintf(out, cap, "[dict]"); break;
+    case MI_RT_VAL_KVREF:  (void)snprintf(out, cap, "<kvref>"); break;
     case MI_RT_VAL_BLOCK:  (void)snprintf(out, cap, "{...}"); break;
     case MI_RT_VAL_PAIR:   (void)snprintf(out, cap, "<pair>"); break;
     default:               (void)snprintf(out, cap, "<unknown>"); break;
   }
+}
+
+static MiRtValue s_vm_cmd_dict(MiVm* vm, int argc, const MiRtValue* argv)
+{
+  if (!vm || !vm->rt)
+  {
+    return mi_rt_make_void();
+  }
+
+  if (argc != 1)
+  {
+    mi_error("dict: expected 1 argument (list of [k, v] entries)\n");
+    return mi_rt_make_void();
+  }
+
+  if (argv[0].kind != MI_RT_VAL_LIST || !argv[0].as.list)
+  {
+    mi_error("dict: argument must be a list of [k, v] entries\n");
+    return mi_rt_make_void();
+  }
+
+  MiRtDict* d = mi_rt_dict_create(vm->rt);
+  if (!d)
+  {
+    return mi_rt_make_void();
+  }
+
+  MiRtList* entries = argv[0].as.list;
+  for (size_t i = 0u; i < entries->count; ++i)
+  {
+    MiRtValue kv = entries->items[i];
+    if (kv.kind != MI_RT_VAL_LIST || !kv.as.list || kv.as.list->count != 2u)
+    {
+      mi_error("dict: each entry must be a 2-element list [k, v]\n");
+      continue;
+    }
+    MiRtValue k = kv.as.list->items[0];
+    MiRtValue v = kv.as.list->items[1];
+    (void) mi_rt_dict_set(vm->rt, d, k, v);
+  }
+
+  return mi_rt_make_dict(d);
 }
 
 static MiRtValue s_vm_cmd_print(MiVm* vm, int argc, const MiRtValue* argv)
@@ -273,6 +329,7 @@ void mi_vm_init(MiVm* vm, MiRuntime* rt)
   (void) mi_vm_register_command(vm, x_slice_from_cstr("print"), s_vm_cmd_print);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("set"),   s_vm_cmd_set);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("call"),  s_vm_cmd_call);
+  (void) mi_vm_register_command(vm, x_slice_from_cstr("dict"),  s_vm_cmd_dict);
 }
 
 void mi_vm_shutdown(MiVm* vm)
@@ -1131,7 +1188,7 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e, bool wants_
 
   /* Special form: foreach
      Grammar (command args):
-       foreach :: <varname> <expr_list> <body_block>
+       foreach : <varname> <expr_list> <body_block>
 
      Notes:
        - <varname> must be a literal identifier (string literal).
@@ -1204,25 +1261,34 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e, bool wants_
 
     int32_t foreach_sym = s_chunk_add_symbol(b->chunk, varname_expr->as.string_lit.value);
 
-    uint8_t list_reg = s_compile_expr(b, list_expr);
-
-    uint8_t len_reg = s_alloc_reg(b);
-    s_chunk_emit(b->chunk, MI_VM_OP_LEN, len_reg, list_reg, 0, 0);
+    /*
+      In Minima, bare identifiers are parsed as string literals.
+      For foreach, allow iterating a variable by writing its name
+      directly (no '$'):
+        foreach : x xs { ... }
+      This keeps foreach ergonomic without changing identifier rules
+      globally.
+    */
+    uint8_t container_reg = 0;
+    if (list_expr->kind == MI_EXPR_STRING_LITERAL)
+    {
+      int32_t sym = s_chunk_add_symbol(b->chunk, list_expr->as.string_lit.value);
+      container_reg = s_alloc_reg(b);
+      s_chunk_emit(b->chunk, MI_VM_OP_LOAD_VAR, container_reg, 0, 0, sym);
+    }
+    else
+    {
+      container_reg = s_compile_expr(b, list_expr);
+    }
 
     uint8_t idx_reg = s_alloc_reg(b);
     s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, idx_reg, 0, 0, s_chunk_add_const(b->chunk, mi_rt_make_int(-1)));
 
-    uint8_t one_reg = s_alloc_reg(b);
-    s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, one_reg, 0, 0, s_chunk_add_const(b->chunk, mi_rt_make_int(1)));
+    size_t loop_label = b->chunk->code_count;
 
-    size_t inc_label = b->chunk->code_count;
-
-    /* idx = idx + 1 */
-    s_chunk_emit(b->chunk, MI_VM_OP_ADD, idx_reg, idx_reg, one_reg, 0);
-
-    /* cond = idx < len */
     uint8_t cond_reg = s_alloc_reg(b);
-    s_chunk_emit(b->chunk, MI_VM_OP_LT, cond_reg, idx_reg, len_reg, 0);
+    uint8_t item_reg = s_alloc_reg(b);
+    s_chunk_emit(b->chunk, MI_VM_OP_ITER_NEXT, cond_reg, container_reg, idx_reg, (int32_t)item_reg);
 
     /* JF cond, <to end> */
     size_t jf_index = b->chunk->code_count;
@@ -1237,7 +1303,7 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e, bool wants_
     {
       loop_idx = b->loop_depth;
       b->loop_depth += 1;
-      b->loops[loop_idx].loop_start_ip = inc_label;
+      b->loops[loop_idx].loop_start_ip = loop_label;
       b->loops[loop_idx].break_jump_count = 0;
       b->loops[loop_idx].scope_base_depth = loop_scope_base;
     }
@@ -1246,12 +1312,8 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e, bool wants_
       mi_error("foreach: loop nesting too deep\n");
     }
 
-    /* foreach var = list[idx] */
-    {
-      uint8_t item_reg = s_alloc_reg(b);
-      s_chunk_emit(b->chunk, MI_VM_OP_INDEX, item_reg, list_reg, idx_reg, 0);
-      s_chunk_emit(b->chunk, MI_VM_OP_STORE_VAR, item_reg, 0, 0, foreach_sym);
-    }
+    /* foreach var = item (local bind) */
+    s_chunk_emit(b->chunk, MI_VM_OP_DEFINE_VAR, item_reg, 0, 0, foreach_sym);
 
     uint8_t saved_reg_base = b->reg_base;
     b->reg_base = b->next_reg;
@@ -1263,11 +1325,11 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e, bool wants_
     s_chunk_emit(b->chunk, MI_VM_OP_SCOPE_POP, 0, 0, 0, 0);
     b->inline_scope_depth -= 1;
 
-    /* JMP back to inc_label */
+    /* JMP back to loop_label */
     {
       size_t jmp_index = b->chunk->code_count;
       s_chunk_emit(b->chunk, MI_VM_OP_JUMP, 0, 0, 0, 0);
-      int32_t rel_back = (int32_t)((int64_t)inc_label - (int64_t)(jmp_index + 1u));
+      int32_t rel_back = (int32_t)((int64_t)loop_label - (int64_t)(jmp_index + 1u));
       s_chunk_patch_imm(b->chunk, jmp_index, rel_back);
     }
 
@@ -1480,6 +1542,49 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
           it = it->next;
         }
 
+        return r;
+      }
+
+    case MI_EXPR_DICT:
+      {
+        /* Native dict literal.
+           The parser produces MI_EXPR_DICT with MI_EXPR_PAIR items.
+           We lower directly to a dict allocation followed by STORE_INDEX
+           for each entry, avoiding intermediate list construction. */
+
+        uint8_t dict_reg = s_alloc_reg(b);
+        s_chunk_emit(b->chunk, MI_VM_OP_DICT_NEW, dict_reg, 0, 0, 0);
+
+        const MiExprList* it = e->as.dict.items;
+        while (it)
+        {
+          const MiExpr* pe = it->expr;
+          if (!pe || pe->kind != MI_EXPR_PAIR)
+          {
+            mi_error("dict literal: expected k = v entries\n");
+            break;
+          }
+
+          uint8_t k_reg = s_compile_expr(b, pe->as.pair.key);
+          uint8_t v_reg = s_compile_expr(b, pe->as.pair.value);
+
+          s_chunk_emit(b->chunk, MI_VM_OP_STORE_INDEX, dict_reg, k_reg, v_reg, 0);
+          it = it->next;
+        }
+
+        return dict_reg;
+      }
+
+    case MI_EXPR_PAIR:
+
+      {
+        /* Pairs are not a standalone runtime type. The parser only produces
+           MI_EXPR_PAIR inside MI_EXPR_DICT; encountering it here means the AST
+           was malformed or built manually. */
+        mi_error("pair literal used outside dict literal\n");
+        uint8_t r = s_alloc_reg(b);
+        int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+        s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, r, 0, 0, k);
         return r;
       }
 
@@ -1737,6 +1842,74 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           (void) mi_rt_list_push(base.as.list, v);
         } break;
 
+      case MI_VM_OP_DICT_NEW:
+        {
+          MiRtDict* dict = mi_rt_dict_create(vm->rt);
+          if (!dict)
+          {
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+            break;
+          }
+          s_vm_reg_set(vm, ins.a, mi_rt_make_dict(dict));
+        } break;
+
+      case MI_VM_OP_ITER_NEXT:
+        {
+          uint8_t dst_item = (uint8_t)(ins.imm & 0xFF);
+          MiRtValue container = vm->regs[ins.b];
+          MiRtValue cursor_v = vm->regs[ins.c];
+
+          long long cursor = -1;
+          if (cursor_v.kind == MI_RT_VAL_INT)
+          {
+            cursor = cursor_v.as.i;
+          }
+
+          if (container.kind == MI_RT_VAL_LIST && container.as.list)
+          {
+            MiRtList* list = container.as.list;
+            long long next = cursor + 1;
+            if (next >= 0 && (uint64_t)next < (uint64_t)list->count)
+            {
+              s_vm_reg_set(vm, ins.c, mi_rt_make_int(next));
+              s_vm_reg_set(vm, dst_item, list->items[(size_t)next]);
+              s_vm_reg_set(vm, ins.a, mi_rt_make_bool(true));
+            }
+            else
+            {
+              s_vm_reg_set(vm, ins.a, mi_rt_make_bool(false));
+            }
+            break;
+          }
+
+          if (container.kind == MI_RT_VAL_DICT && container.as.dict)
+          {
+            MiRtDict* dict = container.as.dict;
+            size_t i = (cursor < -1) ? 0u : (size_t)(cursor + 1);
+            while (i < dict->capacity)
+            {
+              MiRtDictEntry* e = &dict->entries[i];
+              if (e->state == 1)
+              {
+                s_vm_reg_set(vm, ins.c, mi_rt_make_int((long long)i));
+                s_vm_reg_set(vm, dst_item, mi_rt_make_kvref(dict, i));
+                s_vm_reg_set(vm, ins.a, mi_rt_make_bool(true));
+                break;
+              }
+              i += 1;
+            }
+
+            if (i >= dict->capacity)
+            {
+              s_vm_reg_set(vm, ins.a, mi_rt_make_bool(false));
+            }
+            break;
+          }
+
+          mi_error("mi_vm: ITER_NEXT unsupported container type\n");
+          s_vm_reg_set(vm, ins.a, mi_rt_make_bool(false));
+        } break;
+
       case MI_VM_OP_INDEX:
         {
           MiRtValue base = vm->regs[ins.b];
@@ -1763,6 +1936,40 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
               break;
             }
             s_vm_reg_set(vm, ins.a, base.as.pair->items[(int)idx]);
+            break;
+          }
+
+          if (base.kind == MI_RT_VAL_KVREF && key.kind == MI_RT_VAL_INT)
+          {
+            long long idx = key.as.i;
+            MiRtDict* dict = base.as.kvref.dict;
+            size_t entry_index = base.as.kvref.entry_index;
+            if (!dict || entry_index >= dict->capacity)
+            {
+              s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+              break;
+            }
+            MiRtDictEntry* e = &dict->entries[entry_index];
+            if (e->state != 1 || (idx != 0 && idx != 1))
+            {
+              s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+              break;
+            }
+            s_vm_reg_set(vm, ins.a, (idx == 0) ? e->key : e->value);
+            break;
+          }
+
+          if (base.kind == MI_RT_VAL_DICT && base.as.dict)
+          {
+            MiRtValue out;
+            if (mi_rt_dict_get(base.as.dict, key, &out))
+            {
+              s_vm_reg_set(vm, ins.a, out);
+            }
+            else
+            {
+              s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+            }
             break;
           }
 
@@ -1801,6 +2008,12 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             break;
           }
 
+          if (base.kind == MI_RT_VAL_DICT && base.as.dict)
+          {
+            (void) mi_rt_dict_set(vm->rt, base.as.dict, key, value);
+            break;
+          }
+
           mi_error("mi_vm: STORE_INDEX unsupported types\n");
         } break;
 
@@ -1814,6 +2027,18 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           }
 
           if (v.kind == MI_RT_VAL_PAIR && v.as.pair)
+          {
+            s_vm_reg_set(vm, ins.a, mi_rt_make_int(2));
+            break;
+          }
+
+          if (v.kind == MI_RT_VAL_DICT && v.as.dict)
+          {
+            s_vm_reg_set(vm, ins.a, mi_rt_make_int((int64_t)mi_rt_dict_count(v.as.dict)));
+            break;
+          }
+
+          if (v.kind == MI_RT_VAL_KVREF)
           {
             s_vm_reg_set(vm, ins.a, mi_rt_make_int(2));
             break;
@@ -1922,6 +2147,12 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
         {
           XSlice name = chunk->symbols[ins.imm];
           (void) mi_rt_var_set(vm->rt, name, vm->regs[ins.a]);
+        } break;
+
+      case MI_VM_OP_DEFINE_VAR:
+        {
+          XSlice name = chunk->symbols[ins.imm];
+          (void) mi_rt_var_define(vm->rt, name, vm->regs[ins.a]);
         } break;
 
       case MI_VM_OP_LOAD_INDIRECT_VAR:
@@ -2189,7 +2420,9 @@ static const char* s_op_name(MiVmOp op)
     case MI_VM_OP_LOAD_BLOCK:         return "LDB";
     case MI_VM_OP_MOV:                return "MOV";
     case MI_VM_OP_LIST_NEW:           return "LNEW";
+    case MI_VM_OP_DICT_NEW:           return "DNEW";
     case MI_VM_OP_LIST_PUSH:          return "LPUSH";
+    case MI_VM_OP_ITER_NEXT:          return "ITNEXT";
     case MI_VM_OP_INDEX:              return "INDEX";
     case MI_VM_OP_STORE_INDEX:        return "STINDEX";
     case MI_VM_OP_LEN:                return "LEN";
@@ -2210,6 +2443,7 @@ static const char* s_op_name(MiVmOp op)
     case MI_VM_OP_OR:                 return "OR";
     case MI_VM_OP_LOAD_VAR:           return "LDV";
     case MI_VM_OP_STORE_VAR:          return "STV";
+    case MI_VM_OP_DEFINE_VAR:         return "DEFV";
     case MI_VM_OP_LOAD_INDIRECT_VAR:  return "LDIV";
     case MI_VM_OP_ARG_CLEAR:          return "ACLR";
     case MI_VM_OP_ARG_PUSH:           return "APR";
@@ -2352,9 +2586,19 @@ void mi_vm_disasm(const MiVmChunk* chunk)
         (void)snprintf(instr, sizeof(instr), "%s r%u", s_op_name(op), (unsigned)ins.a);
         break;
 
+      case MI_VM_OP_DICT_NEW:
+        (void)snprintf(instr, sizeof(instr), "%s r%u", s_op_name(op), (unsigned)ins.a);
+        break;
+
       case MI_VM_OP_LIST_PUSH:
         (void)snprintf(instr, sizeof(instr), "%s r%u, r%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b);
         break;
+
+      case MI_VM_OP_ITER_NEXT:
+        {
+          unsigned dst_item = (unsigned)((uint32_t)ins.imm & 0xFFu);
+          (void)snprintf(instr, sizeof(instr), "%s r%u, r%u, r%u -> r%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, (unsigned)ins.c, dst_item);
+        } break;
 
       case MI_VM_OP_INDEX:
         (void)snprintf(instr, sizeof(instr), "%s r%u, r%u, r%u", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, (unsigned)ins.c);
@@ -2403,6 +2647,19 @@ void mi_vm_disasm(const MiVmChunk* chunk)
         break;
 
       case MI_VM_OP_STORE_VAR:
+        (void)snprintf(instr, sizeof(instr), "%s %d, r%u", s_op_name(op), (int)ins.imm, (unsigned)ins.a);
+        if (ins.imm >= 0 && (size_t)ins.imm < chunk->symbol_count)
+        {
+          XSlice s = chunk->symbols[(size_t)ins.imm];
+          (void)snprintf(comment, sizeof(comment), "sym_%d %.*s", (int)ins.imm, (int)s.length, s.ptr);
+        }
+        else
+        {
+          (void)snprintf(comment, sizeof(comment), "<oob>");
+        }
+        break;
+
+      case MI_VM_OP_DEFINE_VAR:
         (void)snprintf(instr, sizeof(instr), "%s %d, r%u", s_op_name(op), (int)ins.imm, (unsigned)ins.a);
         if (ins.imm >= 0 && (size_t)ins.imm < chunk->symbol_count)
         {

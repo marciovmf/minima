@@ -327,12 +327,8 @@ MiRtValue mi_eval_expr_ast(MiRuntime* rt, const MiExpr* expr)
       }
 
     case MI_EXPR_PAIR:
-      {
-        MiRtPair* pair = mi_rt_pair_create(rt);
-        mi_rt_pair_set(rt, pair, 0, mi_eval_expr_ast(rt, expr->as.pair.key));
-        mi_rt_pair_set(rt, pair, 1, mi_eval_expr_ast(rt, expr->as.pair.value));
-        return mi_rt_make_pair(pair);
-      }
+      mi_error("pair literals are only valid inside dictionary literals\n");
+      return mi_rt_make_void();
 
     case MI_EXPR_LIST:
       {
