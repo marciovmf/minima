@@ -1,0 +1,245 @@
+
+#----------------------------------------------------------
+# Test helpers
+#----------------------------------------------------------
+
+cmd: test_fail msg {
+  error: "TEST FAIL:" $msg
+  trace:
+  return: false
+}
+
+cmd: test_ok {
+  return: true
+}
+
+cmd: test_expect cond msg {
+  if: ($cond == true) { return: true }
+  return: (test_fail: $msg)
+}
+
+#----------------------------------------------------------
+# Dictionary tests
+#----------------------------------------------------------
+
+cmd: test_dict_str_keys {
+  set: k "same"
+  set: d [
+    "same"=1,
+    $k=2
+  ]
+  if: ((test_expect: (d["same"] == 2) "string keys must compare/hash by value") == false) { return: false }
+  return: true
+}
+
+cmd: test_dict_scalar_keys {
+  set: d [
+    0="zero",
+    1="one",
+    -7="minus-seven",
+    true="T",
+    false="F"
+  ]
+
+  if: ((test_expect: (d[0] == "zero") "int key 0") == false) { return: false }
+  if: ((test_expect: (d[1] == "one") "int key 1") == false) { return: false }
+  if: ((test_expect: (d[-7] == "minus-seven") "negative int key") == false) { return: false }
+  if: ((test_expect: (d[true] == "T") "bool key true") == false) { return: false }
+  if: ((test_expect: (d[false] == "F") "bool key false") == false) { return: false }
+
+  return: true
+}
+
+cmd: test_dict_list_keys_identity {
+  set: k1 [1, 2, 3]
+  set: k2 [1, 2, 3]
+  set: d [
+    $k1="A",
+    $k2="B"
+  ]
+
+  if: ((test_expect: (d[$k1] == "A") "list key identity k1") == false) { return: false }
+  if: ((test_expect: (d[$k2] == "B") "list key identity k2") == false) { return: false }
+  return: true
+}
+
+cmd: test_dict_dict_keys_identity {
+  set: a [x=1]
+  set: b [x=1]
+  set: d [
+    $a="dictA",
+    $b="dictB"
+  ]
+
+  if: ((test_expect: (d[$a] == "dictA") "dict key identity a") == false) { return: false }
+  if: ((test_expect: (d[$b] == "dictB") "dict key identity b") == false) { return: false }
+  return: true
+}
+
+cmd: test_dict_nested_composite_key_identity {
+  set: inner [p=9]
+  set: k [$inner, 123]
+  set: d [
+    $k="nested"
+  ]
+
+  if: ((test_expect: (d[$k] == "nested") "nested composite key hits") == false) { return: false }
+
+  set: inner2 [p=9]
+  set: k2 [$inner2, 123]
+  if: ((test_expect: (d[$k2] == ()) "different identity should miss") == false) { return: false }
+
+  return: true
+}
+
+#----------------------------------------------------------
+# List + dict constructors and len()
+#----------------------------------------------------------
+
+cmd: test_list_constructor_and_len {
+  set: l list:[k, v, a, b, x, y]
+
+  if: ((test_expect: ((len:$l) == 6) "list: len must be 6") == false) { return: false }
+  if: ((test_expect: ($l[0] == "k") "list[0]") == false) { return: false }
+  if: ((test_expect: ($l[1] == "v") "list[1]") == false) { return: false }
+  if: ((test_expect: ($l[2] == "a") "list[2]") == false) { return: false }
+  if: ((test_expect: ($l[3] == "b") "list[3]") == false) { return: false }
+  if: ((test_expect: ($l[4] == "x") "list[4]") == false) { return: false }
+  if: ((test_expect: ($l[5] == "y") "list[5]") == false) { return: false }
+
+  return: true
+}
+
+cmd: test_dict_constructor_and_len {
+  set: d dict:[k="v", a="b", x="y"]
+
+  if: ((test_expect: ((len:$d) == 3) "dict: len must be 3") == false) { return: false }
+  if: ((test_expect: (d["k"] == "v") "dict[k]") == false) { return: false }
+  if: ((test_expect: (d["a"] == "b") "dict[a]") == false) { return: false }
+  if: ((test_expect: (d["x"] == "y") "dict[x]") == false) { return: false }
+
+  return: true
+}
+
+#----------------------------------------------------------
+# Foreach + iterators
+#----------------------------------------------------------
+
+cmd: test_foreach_dict_iter_kv {
+  set: d [name="bob", age=30, active=true]
+  set: seen_name false
+  set: seen_age false
+  set: seen_active false
+
+  foreach: kv $d {
+    if: ((test_expect: ((len:$kv) == 2) "foreach dict yields 2 elements") == false) { return: false }
+
+    if: ($kv[0] == "name") {
+      if: ((test_expect: ($kv[1] == "bob") "kv name value") == false) { return: false }
+      set: seen_name true
+    }
+
+    if: ($kv[0] == "age") {
+      if: ((test_expect: ($kv[1] == 30) "kv age value") == false) { return: false }
+      set: seen_age true
+    }
+
+    if: ($kv[0] == "active") {
+      if: ((test_expect: ($kv[1] == true) "kv active value") == false) { return: false }
+      set: seen_active true
+    }
+  }
+
+  if: ((test_expect: ($seen_name == true) "must see name") == false) { return: false }
+  if: ((test_expect: ($seen_age == true) "must see age") == false) { return: false }
+  if: ((test_expect: ($seen_active == true) "must see active") == false) { return: false }
+
+  return: true
+}
+
+cmd: test_foreach_list_iter_values {
+  set: xs [10, 20, 30]
+  set: sum 0
+  foreach: x $xs {
+    set: sum ($sum + $x)
+  }
+  if: ((test_expect: ($sum == 60) "list iteration must sum to 60") == false) { return: false }
+  return: true
+}
+
+#----------------------------------------------------------
+# Regression: DCALL inside foreach must not clobber loop scope
+#----------------------------------------------------------
+
+cmd: test_reg_foreach_dcall_scope_clobber {
+  cmd: test_foo { return: false }
+  cmd: test_bar { return: true }
+
+  set: tests [test_foo, test_bar]
+  set: seen_foo false
+  set: seen_bar false
+
+  foreach: i $tests {
+    set: result ($i:)
+    if: ($i == "test_foo") { set: seen_foo true }
+    if: ($i == "test_bar") { set: seen_bar true }
+  }
+
+  if: ((test_expect: ($seen_foo == true) "must still read loop var after call (foo)") == false) { return: false }
+  if: ((test_expect: ($seen_bar == true) "must still read loop var after call (bar)") == false) { return: false }
+
+  return: true
+}
+
+#----------------------------------------------------------
+# Command definition + dynamic call
+#----------------------------------------------------------
+
+cmd: test_cmddef_and_dcall {
+  cmd: sum a b c { return: ($a + $b + $c) }
+
+  if: ((test_expect: ((sum: 10 20 30) == 60) "sum 10 20 30") == false) { return: false }
+  if: ((test_expect: ((sum: 1 2 3) == 6) "sum 1 2 3") == false) { return: false }
+  if: ((test_expect: ((sum: 0 0 0) == 0) "sum 0 0 0") == false) { return: false }
+
+  return: true
+}
+
+#----------------------------------------------------------
+# Runner (counts pass/fail without stopping the whole script)
+#----------------------------------------------------------
+cmd: run_tests {
+  set: tests [
+    test_dict_str_keys,
+    test_dict_scalar_keys,
+    test_dict_list_keys_identity,
+    test_dict_dict_keys_identity,
+    test_dict_nested_composite_key_identity,
+    test_list_constructor_and_len,
+    test_dict_constructor_and_len,
+    test_foreach_dict_iter_kv,
+    test_foreach_list_iter_values,
+    test_reg_foreach_dcall_scope_clobber,
+    test_cmddef_and_dcall
+  ]
+
+  set: num_failed 0
+
+  foreach: test $tests {
+    set: result "[PASS]"
+    if: (not ($test:)) {
+      set: result "[FAIL]"
+      set: fail_count ($fail_count + 1)
+    }
+
+    print: $result "...." $test
+  }
+
+  set: num_tests len: tests
+  set: num_passed ($num_tests - $num_failed)
+  print: "Passed tests " $num_passed "of" $num_tests
+  assert: ($num_failed == 0) "tests failed."
+}
+
+run_tests:
+

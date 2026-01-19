@@ -28,16 +28,18 @@ list(APPEND SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_runtime.c
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_heap.c
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_vm.c
-  ${CMAKE_CURRENT_LIST_DIR}/src/main.c)
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_mix.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/main.c
+)
 
 if(MSVC)
   configure_file(src/version.rc.in ${CMAKE_CURRENT_LIST_DIR}/src/version.rc)
   list(APPEND SOURCES src/version.rc)
 endif()
 
-add_executable(minima ${SOURCES})
-target_include_directories(minima
-  PUBLIC ${STDX_INCLUDE_DIR})
+# Minima VM
+add_executable(minima ${CMAKE_CURRENT_LIST_DIR}/src/main.c ${SOURCES})
+target_include_directories(minima PUBLIC ${STDX_INCLUDE_DIR})
 set_target_properties(minima PROPERTIES
   VERSION ${VERSION_MAJOR}.${VERSION_MINOR})
 set_target_output_directory(minima ${CMAKE_CURRENT_LIST_DIR}/bin/${CMAKE_SYSTEM_NAME}_${CMAKE_HOST_SYSTEM_PROCESSOR}_$<CONFIG>)

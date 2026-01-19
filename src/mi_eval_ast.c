@@ -1,5 +1,6 @@
 #include "mi_eval_ast.h"
 #include "mi_log.h"
+#include "mi_runtime.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -91,7 +92,10 @@ static MiRtValue s_eval_binary_string(MiTokenKind op, const MiRtValue* a, const 
 static MiRtValue s_eval_binary_numeric(MiTokenKind op, const MiRtValue* a, const MiRtValue* b)
 {
   bool is_float = (a->kind == MI_RT_VAL_FLOAT) || (b->kind == MI_RT_VAL_FLOAT);
-  if (!is_float && a->kind != MI_RT_VAL_INT && b->kind != MI_RT_VAL_INT)
+
+  if (!is_float &&
+      (a->kind != MI_RT_VAL_INT && b->kind != MI_RT_VAL_INT) &&
+      (a->kind != MI_RT_VAL_VOID && b->kind != MI_RT_VAL_VOID))
   {
     mi_error("binary operator: expected numeric operands\n");
     return mi_rt_make_void();
@@ -283,7 +287,7 @@ MiRtValue mi_eval_expr_ast(MiRuntime* rt, const MiExpr* expr)
           case MI_TOK_NOT:
             if (v.kind != MI_RT_VAL_BOOL)
             {
-              mi_error("not expects bool operand\n");
+               mi_error_fmt("not expects bool operand (%d)\n",  v.kind);
               return mi_rt_make_void();
             }
             return mi_rt_make_bool(!v.as.b);
@@ -318,6 +322,10 @@ MiRtValue mi_eval_expr_ast(MiRuntime* rt, const MiExpr* expr)
 
         MiRtValue left = mi_eval_expr_ast(rt, expr->as.binary.left);
         MiRtValue right = mi_eval_expr_ast(rt, expr->as.binary.right);
+
+        // voids are equal
+        if (left.kind == MI_RT_VAL_VOID && right.kind == MI_RT_VAL_VOID)
+          return mi_rt_make_bool(true);
 
         if (left.kind == MI_RT_VAL_STRING && right.kind == MI_RT_VAL_STRING)
         {
@@ -606,7 +614,7 @@ static void s_fold_program(const MiScript* script)
   MiRuntime tmp;
   mi_rt_init(&tmp);
   mi_ast_backend_bind(&tmp);
- 
+
   // We do not register builtins because we do not actuall execute code
   //mi_cmd_register_builtins(&tmp);
 

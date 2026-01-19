@@ -12,23 +12,55 @@
 #include "mi_parse.h"
 #include "mi_runtime.h"
 
+typedef struct MiVm MiVm;
+typedef struct MiVmChunk MiVmChunk;
+
 #define MI_VM_REG_COUNT 32
 #define MI_VM_ARG_STACK_COUNT 256
+#define MI_VM_ARG_FRAME_MAX 16
+
+/* Debug call stack (blocks + user commands). */
+#define MI_VM_CALL_STACK_MAX 64
+
+typedef enum MiVmCallFrameKind
+{
+  MI_VM_CALL_FRAME_BLOCK = 1,
+  MI_VM_CALL_FRAME_USER_CMD = 2,
+} MiVmCallFrameKind;
+
+typedef struct MiVmCallFrame
+{
+  MiVmCallFrameKind kind;
+  XSlice            name; /* For MI_VM_CALL_FRAME_USER_CMD; otherwise empty. */
+  const MiVmChunk*  caller_chunk;
+  size_t            caller_ip; /* Instruction index in caller chunk (0-based). */
+} MiVmCallFrame;
 
 //----------------------------------------------------------
 // Minima VM
 //----------------------------------------------------------
 
-typedef struct MiVm MiVm;
-typedef struct MiVmChunk MiVmChunk;
 
-typedef MiRtValue (*MiVmCommandFn)(MiVm* vm, int argc, const MiRtValue* argv);
+/* VM command entrypoint.
+   - name is the invoked command name (useful for user-defined commands).
+   - argv does NOT include the command name; it's only the arguments.
+*/
+typedef MiRtValue (*MiVmCommandFn)(MiVm* vm, XSlice name, int argc, const MiRtValue* argv);
 
 typedef struct MiVmCommandEntry
 {
   XSlice         name;
   MiVmCommandFn  fn;
 } MiVmCommandEntry;
+
+typedef struct MiVmUserCommand
+{
+  XSlice   name;
+  uint32_t param_count;
+  XSlice*  param_names;
+  MiRtValue* defaults;
+  MiRtValue body; /* MI_RT_VAL_BLOCK */
+} MiVmUserCommand;
 
 typedef enum MiVmOp
 {
@@ -83,6 +115,8 @@ typedef enum MiVmOp
   MI_VM_OP_ARG_PUSH_CONST,    // push const[imm]
   MI_VM_OP_ARG_PUSH_VAR_SYM,  // push $sym[imm]
   MI_VM_OP_ARG_PUSH_SYM,
+  MI_VM_OP_ARG_SAVE,          // save arg stack to a VM-side frame stack
+  MI_VM_OP_ARG_RESTORE,       // restore arg stack from a VM-side frame stack
   MI_VM_OP_CALL_CMD,          // a = call cmd_fn[imm] with argc=b
   MI_VM_OP_CALL_CMD_DYN,      // a = call by name in regs[b], argc=c
 
@@ -113,6 +147,12 @@ struct MiVmChunk
   size_t     code_count;
   size_t     code_capacity;
 
+  /* Optional debug metadata: token per instruction (line/column).
+     Present only when compilation enabled embed_debug_tokens. */
+  MiToken*   code_tokens;
+
+  bool      embed_debug_tokens;
+
   MiRtValue* consts;
   size_t     const_count;
   size_t     const_capacity;
@@ -139,15 +179,37 @@ struct MiVm
   size_t            command_count;
   size_t            command_capacity;
 
+  MiVmUserCommand*  user_cmds;
+  size_t            user_cmd_count;
+  size_t            user_cmd_capacity;
+
   // Working state (execution).
   MiRtValue regs[MI_VM_REG_COUNT];
   MiRtValue arg_stack[MI_VM_ARG_STACK_COUNT];
   int       arg_top;
+
+  // Arg stack save/restore for nested command expressions.
+  MiRtValue arg_frames[MI_VM_ARG_FRAME_MAX][MI_VM_ARG_STACK_COUNT];
+  int       arg_frame_tops[MI_VM_ARG_FRAME_MAX];
+  int       arg_frame_depth;
+
+  // Debug: track current instruction and call stack for trace:.
+  const MiVmChunk*  dbg_chunk;
+  size_t            dbg_ip; /* last fetched instruction index (0-based). */
+  MiVmCallFrame     call_stack[MI_VM_CALL_STACK_MAX];
+  int               call_depth;
 };
 
 //----------------------------------------------------------
 // Public API
 //----------------------------------------------------------
+
+typedef struct MiVmCompileOptions
+{
+  /* When true, the compiler embeds MiToken for each emitted instruction
+     (line/column), enabling richer stack traces and disassembly. */
+  bool embed_debug_tokens;
+} MiVmCompileOptions;
 
 void      mi_vm_init(MiVm* vm, MiRuntime* rt);
 void      mi_vm_shutdown(MiVm* vm);
@@ -159,8 +221,12 @@ bool      mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn);
 
 /* Compile a script to bytecode chunk using the provided arena for allocations. */
 MiVmChunk* mi_vm_compile_script(MiVm* vm, XSlice source);
+MiVmChunk* mi_vm_compile_script_ex(MiVm* vm, XSlice source, const MiVmCompileOptions* opt);
 /* Destroy a chunk created by mi_vm_compile_script (frees heap allocations). */
 void      mi_vm_chunk_destroy(MiVmChunk* chunk);
+
+/* Debug: fetch token metadata for an instruction (if embedded). */
+const MiToken* mi_vm_chunk_token_at(const MiVmChunk* chunk, size_t ip);
 
 /* Execute a compiled chunk. Returns last command value. */
 MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk);

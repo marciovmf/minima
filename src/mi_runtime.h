@@ -40,7 +40,8 @@ typedef enum MiRtValueKind
   MI_RT_VAL_DICT,
   MI_RT_VAL_KVREF,
   MI_RT_VAL_BLOCK,
-  MI_RT_VAL_PAIR
+  MI_RT_VAL_PAIR,
+  MI_RT_VAL_TYPE
 } MiRtValueKind;
 
 struct MiRtValue
@@ -382,6 +383,14 @@ MiRtValue mi_rt_make_pair(MiRtPair* pair);
  * @return      Block runtime value.
  */
 MiRtValue mi_rt_make_block(MiRtBlock* block);
+
+/**
+ * Create a type-token runtime value.
+ * The payload is a MiRtValueKind encoded as an integer.
+ * @param kind Runtime value kind.
+ * @return     Type-token runtime value.
+ */
+MiRtValue mi_rt_make_type(MiRtValueKind kind);
 
 
 #endif // MI_RUNTIME_H

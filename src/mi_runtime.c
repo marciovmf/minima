@@ -202,13 +202,22 @@ void mi_rt_shutdown(MiRuntime* rt)
     }
   }
 
-  x_arena_destroy(rt->root.arena);
-
-  mi_heap_shutdown(&rt->heap);
+  /*
+   * NOTE: We clear runtime pointers *before* shutting down the heap.
+   * If the heap shutdown triggers allocator diagnostics / heap validation on
+   * some platforms, touching the runtime struct after that can trip crashes
+   * when earlier corruption is present. Clearing first makes shutdown robust
+   * and keeps the runtime in a known state even if shutdown aborts early.
+   */
+  XArena* root_arena = rt->root.arena;
   rt->root.arena = NULL;
   rt->root.vars = NULL;
   rt->root.parent = NULL;
   rt->current = NULL;
+
+  x_arena_destroy(root_arena);
+
+  mi_heap_shutdown(&rt->heap);
 
   if (rt->commands)
   {
@@ -1004,6 +1013,14 @@ MiRtValue mi_rt_make_block(MiRtBlock* block)
   MiRtValue out;
   out.kind = MI_RT_VAL_BLOCK;
   out.as.block = block;
+  return out;
+}
+
+MiRtValue mi_rt_make_type(MiRtValueKind kind)
+{
+  MiRtValue out;
+  out.kind = MI_RT_VAL_TYPE;
+  out.as.i = (long long) kind;
   return out;
 }
 

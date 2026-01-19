@@ -1,9 +1,11 @@
 #include <stdx_common.h>
+
 #define X_IMPL_STRBUILDER
 #define X_IMPL_STRING
 #define X_IMPL_ARENA
 #define X_IMPL_IO
 #define X_IMPL_LOG
+
 #include <stdx_strbuilder.h>
 #include <stdx_string.h>
 #include <stdx_arena.h>
@@ -12,36 +14,63 @@
 
 #include <stdlib.h>
 #include <string.h>
+
 #include "minima.h"
 
-int test_compiler(XSlice source)
+//----------------------------------------------------------
+// CLI helpers
+//----------------------------------------------------------
+
+static void s_usage(const char* exe)
 {
-  MiCompiler  c;
-  MiProgram   out;
-  mi_compiler_init(&c, 4 * 1024);
-  bool success = mi_compile_script(&c, source, &out);
-
-  mi_disasm_program(stdout, &out);
-
-  mi_compiler_shutdown(&c);
-  return success ? 0 : 1;
+  mi_error_fmt(
+      "Usage:\n"
+      "  %s -c <file.min> [out.mx]   Compile only (default out = file.min.mx)\n"
+      "  %s -d <file.mx>             Disassemble MIX file\n"
+      "  %s <file.min>               Compile and run\n"
+      "  %s <file.mx>                Run MIX file\n",
+      exe, exe, exe, exe);
 }
 
-int test_vm_eval(XSlice source)
+static bool s_has_ext(const char* path, const char* ext)
 {
-  XArena* arena = x_arena_create(1024 * 32);
-  if (!arena)
+  size_t lp = strlen(path);
+  size_t le = strlen(ext);
+  if (lp < le)
   {
-    mi_error("Failed to create arena\n");
+    return false;
+  }
+  return strcmp(path + (lp - le), ext) == 0;
+}
+
+static char* s_default_out_path(const char* in_path)
+{
+  size_t n = strlen(in_path);
+  char* out = (char*)malloc(n + 4 + 1);
+  if (!out)
+  {
+    return NULL;
+  }
+  memcpy(out, in_path, n);
+  memcpy(out + n, ".mx", 4);
+  return out;
+}
+
+//----------------------------------------------------------
+// Actions
+//----------------------------------------------------------
+
+static int s_cmd_compile_only(const char* in_file, const char* out_file)
+{
+  size_t src_len = 0;
+  char* src = x_io_read_text(in_file, &src_len);
+  if (!src)
+  {
+    mi_error_fmt("Failed to read: %s\n", in_file);
     return 1;
   }
 
-  //MiParseResult res = mi_parse_program(source.ptr, source.length, arena);
-  //if (!res.ok || !res.script)
-  //{
-  //  x_arena_destroy(arena);
-  //  return 1;
-  //}
+  XSlice source = x_slice_init(src, src_len);
 
   MiRuntime rt;
   mi_rt_init(&rt);
@@ -50,46 +79,185 @@ int test_vm_eval(XSlice source)
   mi_vm_init(&vm, &rt);
 
   MiVmChunk* ch = mi_vm_compile_script(&vm, source);
-  mi_vm_disasm(ch);
+  if (!ch)
+  {
+    mi_error_fmt("Compilation failed: %s\n", in_file);
+    mi_vm_shutdown(&vm);
+    mi_rt_shutdown(&rt);
+    free(src);
+    return 1;
+  }
+
+  if (!mi_mix_save_file(ch, out_file))
+  {
+    mi_error_fmt("Failed to write MIX file: %s\n", out_file);
+    mi_vm_chunk_destroy(ch);
+    mi_vm_shutdown(&vm);
+    mi_rt_shutdown(&rt);
+    free(src);
+    return 1;
+  }
+
+  mi_vm_chunk_destroy(ch);
+  mi_vm_shutdown(&vm);
+  mi_rt_shutdown(&rt);
+  free(src);
+  return 0;
+}
+
+static int s_cmd_disasm(const char* mx_file)
+{
+  MiRuntime rt;
+  mi_rt_init(&rt);
+
+  MiVm vm;
+  mi_vm_init(&vm, &rt);
+
+  MiMixProgram p;
+  if (!mi_mix_load_file(&vm, mx_file, &p))
+  {
+    mi_error_fmt("Failed to load MIX file: %s\n", mx_file);
+    mi_vm_shutdown(&vm);
+    mi_rt_shutdown(&rt);
+    return 1;
+  }
+
+  mi_vm_disasm(p.entry);
+
+  mi_mix_program_destroy(&p);
+  mi_vm_shutdown(&vm);
+  mi_rt_shutdown(&rt);
+  return 0;
+}
+
+static int s_cmd_run_source(const char* mi_file)
+{
+  size_t src_len = 0;
+  char* src = x_io_read_text(mi_file, &src_len);
+  if (!src)
+  {
+    mi_error_fmt("Failed to read: %s\n", mi_file);
+    return 1;
+  }
+  XSlice source = x_slice_init(src, src_len);
+
+  MiRuntime rt;
+  mi_rt_init(&rt);
+
+  MiVm vm;
+  mi_vm_init(&vm, &rt);
+
+  MiVmChunk* ch = mi_vm_compile_script(&vm, source);
+  if (!ch)
+  {
+    mi_error_fmt("Compilation failed: %s\n", mi_file);
+    mi_vm_shutdown(&vm);
+    mi_rt_shutdown(&rt);
+    free(src);
+    return 1;
+  }
+
   (void)mi_vm_execute(&vm, ch);
   mi_vm_chunk_destroy(ch);
 
   mi_vm_shutdown(&vm);
   mi_rt_shutdown(&rt);
-  x_arena_destroy(arena);
+  free(src);
   return 0;
 }
 
-int main(int argc, char **argv)
+static int s_cmd_run_mix(const char* mx_file)
 {
-  if (argc < 2)
+  MiRuntime rt;
+  mi_rt_init(&rt);
+
+  MiVm vm;
+  mi_vm_init(&vm, &rt);
+
+  MiMixProgram p;
+  if (!mi_mix_load_file(&vm, mx_file, &p))
   {
-    mi_error_fmt("Usage: %s <script.min>\n", argv[0]);
+    mi_error_fmt("Failed to load MIX file: %s\n", mx_file);
+    mi_vm_shutdown(&vm);
+    mi_rt_shutdown(&rt);
     return 1;
   }
 
-  const char* filename = argv[1];
-  size_t src_len = 0;
-  char *src = x_io_read_text(filename, &src_len);
-  if (!src) { return 1; }
+  (void)mi_vm_execute(&vm, p.entry);
 
-  XSlice source = x_slice_init(src, src_len);
+  mi_mix_program_destroy(&p);
+  mi_vm_shutdown(&vm);
+  mi_rt_shutdown(&rt);
+  return 0;
+}
 
-  int result = 0;
-  if (argc >= 3 && strcmp(argv[2], "--vm") == 0)
+//----------------------------------------------------------
+// main
+//----------------------------------------------------------
+
+int main(int argc, char** argv)
+{
+  if (argc < 2)
   {
-    result = test_vm_eval(source);
+    s_usage(argv[0]);
+    return 1;
   }
-  else
+
+  // Compile only
+  if (strcmp(argv[1], "-c") == 0)
   {
-    result = test_compiler(source);
+    if (argc != 3 && argc != 4)
+    {
+      s_usage(argv[0]);
+      return 1;
+    }
+
+    const char* in_file = argv[2];
+    const char* out_file = NULL;
+    char* owned_out = NULL;
+
+    if (argc == 4)
+    {
+      out_file = argv[3];
+    }
+    else
+    {
+      owned_out = s_default_out_path(in_file);
+      if (!owned_out)
+      {
+        mi_error("Out of memory\n");
+        return 1;
+      }
+      out_file = owned_out;
+    }
+
+    int r = s_cmd_compile_only(in_file, out_file);
+    free(owned_out);
+    return r;
   }
 
-  if (result == 0)
-    mi_info("Success\n");
-  else
-    mi_error("Fail\n");
+  // Disassemble
+  if (strcmp(argv[1], "-d") == 0)
+  {
+    if (argc != 3)
+    {
+      s_usage(argv[0]);
+      return 1;
+    }
+    return s_cmd_disasm(argv[2]);
+  }
 
-  free(src);
-  return result;
+  // Single arg: compile+run or run MIX
+  if (argc == 2)
+  {
+    const char* path = argv[1];
+    if (s_has_ext(path, ".mx"))
+    {
+      return s_cmd_run_mix(path);
+    }
+    return s_cmd_run_source(path);
+  }
+
+  s_usage(argv[0]);
+  return 1;
 }
