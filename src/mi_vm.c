@@ -12,7 +12,7 @@
 // Internal helpers
 //----------------------------------------------------------
 
-static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XArena* arena, bool embed_debug_tokens);
+static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XArena* arena);
 
 static void* s_realloc(void* ptr, size_t size)
 {
@@ -570,31 +570,6 @@ static void s_vm_trace_print_frame(const MiVmChunk* chunk, size_t ip, const char
 
   const MiVmIns ins = chunk->code[ip];
   const char* opname = s_op_name((MiVmOp)ins.op);
-
-  int line = 0;
-  int column = 0;
-  const MiToken* tok = mi_vm_chunk_token_at(chunk, ip);
-  if (tok)
-  {
-    line = tok->line;
-    column = tok->column;
-  }
-
-  if (line > 0)
-  {
-    printf("  %s %d:%d ip=%zu %s a=%u b=%u c=%u imm=%d\n",
-      label ? label : "",
-      line,
-      column,
-      ip,
-      opname ? opname : "<?>",
-      (unsigned)ins.a,
-      (unsigned)ins.b,
-      (unsigned)ins.c,
-      (int)ins.imm);
-    return;
-  }
-
   printf("  %s ip=%zu %s a=%u b=%u c=%u imm=%d\n",
     label ? label : "",
     ip,
@@ -1061,7 +1036,7 @@ bool mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn)
 // Chunk helpers
 //----------------------------------------------------------
 
-static MiVmChunk* s_chunk_create(bool embed_debug_tokens)
+static MiVmChunk* s_chunk_create(void)
 {
   MiVmChunk* c = (MiVmChunk*) calloc(1, sizeof(*c));
   if (!c)
@@ -1069,7 +1044,6 @@ static MiVmChunk* s_chunk_create(bool embed_debug_tokens)
     mi_error("mi_vm: out of memory\n");
     exit(1);
   }
-  c->embed_debug_tokens = embed_debug_tokens ? true : false;
   return c;
 }
 
@@ -1115,7 +1089,6 @@ static void s_vm_chunk_destroy_ex(MiVmChunk* chunk, MiVmChunk** stack, size_t de
   free(chunk->symbols);
   free(chunk->cmd_fns);
   free(chunk->cmd_names);
-  free(chunk->code_tokens);
   free(chunk);
 }
 
@@ -1124,32 +1097,12 @@ void mi_vm_chunk_destroy(MiVmChunk* chunk)
   s_vm_chunk_destroy_ex(chunk, NULL, 0);
 }
 
-const MiToken* mi_vm_chunk_token_at(const MiVmChunk* chunk, size_t ip)
-{
-  if (!chunk || !chunk->embed_debug_tokens || !chunk->code_tokens)
-  {
-    return NULL;
-  }
-  if (ip >= chunk->code_count)
-  {
-    return NULL;
-  }
-  return &chunk->code_tokens[ip];
-}
-
-
-static void s_chunk_emit_ex(MiVmChunk* c, const MiToken* tok, MiVmOp op, uint8_t a, uint8_t b, uint8_t d, int32_t imm)
+static void s_chunk_emit(MiVmChunk* c, MiVmOp op, uint8_t a, uint8_t b, uint8_t d, int32_t imm)
 {
   if (c->code_count == c->code_capacity)
   {
     size_t new_cap = c->code_capacity ? c->code_capacity * 2u : 256u;
     c->code = (MiVmIns*) s_realloc(c->code, new_cap * sizeof(*c->code));
-
-    if (c->embed_debug_tokens)
-    {
-      c->code_tokens = (MiToken*) s_realloc(c->code_tokens, new_cap * sizeof(*c->code_tokens));
-    }
-
     c->code_capacity = new_cap;
   }
 
@@ -1159,30 +1112,8 @@ static void s_chunk_emit_ex(MiVmChunk* c, const MiToken* tok, MiVmOp op, uint8_t
   ins.b = b;
   ins.c = d;
   ins.imm = imm;
-  c->code[c->code_count] = ins;
-
-  if (c->embed_debug_tokens)
-  {
-    if (tok)
-    {
-      c->code_tokens[c->code_count] = *tok;
-    }
-    else
-    {
-      MiToken z;
-      memset(&z, 0, sizeof(z));
-      c->code_tokens[c->code_count] = z;
-    }
-  }
-
-  c->code_count += 1;
+  c->code[c->code_count++] = ins;
 }
-
-static void s_chunk_emit(MiVmChunk* c, MiVmOp op, uint8_t a, uint8_t b, uint8_t d, int32_t imm)
-{
-  s_chunk_emit_ex(c, NULL, op, a, b, d, imm);
-}
-
 
 static bool s_chunk_const_eq(MiRtValue a, MiRtValue b)
 {
@@ -1571,7 +1502,7 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e, bool wants_
   {
     const MiExprList* only = e->as.command.args;
     uint8_t block_reg = s_compile_expr(b, only ? only->expr : NULL);
-    s_chunk_emit_ex(b->chunk, e ? &e->token : NULL, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+    s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
     return dst;
   }
 
@@ -1644,7 +1575,7 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e, bool wants_
     argc += 1;
 
     int32_t cmd_id = s_chunk_add_cmd_fn(b->chunk, x_slice_from_cstr("cmd"), cmd_fn);
-    s_chunk_emit_ex(b->chunk, e ? &e->token : NULL, MI_VM_OP_CALL_CMD, dst, argc, 0, cmd_id);
+    s_chunk_emit(b->chunk, MI_VM_OP_CALL_CMD, dst, argc, 0, cmd_id);
     return dst;
   }
 
@@ -1818,7 +1749,7 @@ cmd_special_form_done:
       else
       {
         uint8_t block_reg = s_compile_expr(b, then_block);
-        s_chunk_emit_ex(b->chunk, e ? &e->token : NULL, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+        s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
       }
 
       /* JMP <to end> */
@@ -1885,7 +1816,7 @@ cmd_special_form_done:
         else
         {
           uint8_t block_reg = s_compile_expr(b, else_block);
-          s_chunk_emit_ex(b->chunk, e ? &e->token : NULL, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
+          s_chunk_emit(b->chunk, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
         }
         break;
       }
@@ -2237,15 +2168,6 @@ cmd_special_form_done:
   }
 
   const MiExpr* head = e->as.command.head;
-  const MiToken* call_tok = NULL;
-  if (head)
-  {
-    call_tok = &head->token;
-  }
-  else
-  {
-    call_tok = &e->token;
-  }
   if (head && head->kind == MI_EXPR_STRING_LITERAL)
   {
     XSlice name = head->as.string_lit.value;
@@ -2253,7 +2175,7 @@ cmd_special_form_done:
     if (fn)
     {
       int32_t cmd_id = s_chunk_add_cmd_fn(b->chunk, name, fn);
-      s_chunk_emit_ex(b->chunk, call_tok, MI_VM_OP_CALL_CMD, dst, argc, 0, cmd_id);
+      s_chunk_emit(b->chunk, MI_VM_OP_CALL_CMD, dst, argc, 0, cmd_id);
     }
     else
     {
@@ -2261,7 +2183,7 @@ cmd_special_form_done:
       uint8_t head_reg = s_alloc_reg(b);
       int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_string_slice(name));
       s_chunk_emit(b->chunk, MI_VM_OP_LOAD_CONST, head_reg, 0, 0, k);
-      s_chunk_emit_ex(b->chunk, call_tok, MI_VM_OP_CALL_CMD_DYN, dst, head_reg, argc, 0);
+      s_chunk_emit(b->chunk, MI_VM_OP_CALL_CMD_DYN, dst, head_reg, argc, 0);
     }
 
     if (preserve_args)
@@ -2273,7 +2195,7 @@ cmd_special_form_done:
 
   // Dynamic head: compute name into a register and do dynamic lookup.
   uint8_t head_reg = s_compile_expr(b, head);
-  s_chunk_emit_ex(b->chunk, call_tok, MI_VM_OP_CALL_CMD_DYN, dst, head_reg, argc, 0);
+  s_chunk_emit(b->chunk, MI_VM_OP_CALL_CMD_DYN, dst, head_reg, argc, 0);
 
   if (preserve_args)
   {
@@ -2374,7 +2296,7 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
     case MI_EXPR_BLOCK:
       {
         uint8_t r = s_alloc_reg(b);
-        MiVmChunk* sub = s_vm_compile_script_ast(b->vm, e->as.block.script, NULL, b->chunk->embed_debug_tokens);
+        MiVmChunk* sub = s_vm_compile_script_ast(b->vm, e->as.block.script, NULL);
         if (!sub)
         {
           int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
@@ -2465,7 +2387,7 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
   }
 }
 
-static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XArena* arena, bool embed_debug_tokens)
+static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XArena* arena)
 {
   (void) arena;
 
@@ -2478,7 +2400,7 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
      pass; it will not execute variables or commands. */
   mi_fold_constants_ast(NULL, script);
 
-  MiVmChunk* chunk = s_chunk_create(embed_debug_tokens);
+  MiVmChunk* chunk = s_chunk_create();
 
   MiVmBuild b;
   memset(&b, 0, sizeof(b));
@@ -2509,17 +2431,11 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
   return chunk;
 }
 
-MiVmChunk* mi_vm_compile_script_ex(MiVm* vm, XSlice source, const MiVmCompileOptions* opt)
+MiVmChunk* mi_vm_compile_script(MiVm* vm, XSlice source)
 {
   if (!vm)
   {
     return NULL;
-  }
-
-  bool embed_debug_tokens = false;
-  if (opt)
-  {
-    embed_debug_tokens = opt->embed_debug_tokens;
   }
 
   /* Ensure runtime exists and builtins are registered. We keep this very
@@ -2569,15 +2485,10 @@ MiVmChunk* mi_vm_compile_script_ex(MiVm* vm, XSlice source, const MiVmCompileOpt
     return NULL;
   }
 
-  MiVmChunk* chunk = s_vm_compile_script_ast(vm, res.script, arena, embed_debug_tokens);
+  MiVmChunk* chunk = s_vm_compile_script_ast(vm, res.script, arena);
 
   x_arena_destroy(arena);
   return chunk;
-}
-
-MiVmChunk* mi_vm_compile_script(MiVm* vm, XSlice source)
-{
-  return mi_vm_compile_script_ex(vm, source, NULL);
 }
 
 
@@ -3827,3 +3738,4 @@ void mi_vm_disasm(const MiVmChunk* chunk)
 {
   s_vm_disasm_ex(chunk, NULL, 0);
 }
+

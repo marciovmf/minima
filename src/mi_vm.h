@@ -147,12 +147,6 @@ struct MiVmChunk
   size_t     code_count;
   size_t     code_capacity;
 
-  /* Optional debug metadata: token per instruction (line/column).
-     Present only when compilation enabled embed_debug_tokens. */
-  MiToken*   code_tokens;
-
-  bool      embed_debug_tokens;
-
   MiRtValue* consts;
   size_t     const_count;
   size_t     const_capacity;
@@ -204,13 +198,6 @@ struct MiVm
 // Public API
 //----------------------------------------------------------
 
-typedef struct MiVmCompileOptions
-{
-  /* When true, the compiler embeds MiToken for each emitted instruction
-     (line/column), enabling richer stack traces and disassembly. */
-  bool embed_debug_tokens;
-} MiVmCompileOptions;
-
 void      mi_vm_init(MiVm* vm, MiRuntime* rt);
 void      mi_vm_shutdown(MiVm* vm);
 
@@ -221,12 +208,8 @@ bool      mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn);
 
 /* Compile a script to bytecode chunk using the provided arena for allocations. */
 MiVmChunk* mi_vm_compile_script(MiVm* vm, XSlice source);
-MiVmChunk* mi_vm_compile_script_ex(MiVm* vm, XSlice source, const MiVmCompileOptions* opt);
 /* Destroy a chunk created by mi_vm_compile_script (frees heap allocations). */
 void      mi_vm_chunk_destroy(MiVmChunk* chunk);
-
-/* Debug: fetch token metadata for an instruction (if embedded). */
-const MiToken* mi_vm_chunk_token_at(const MiVmChunk* chunk, size_t ip);
 
 /* Execute a compiled chunk. Returns last command value. */
 MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk);

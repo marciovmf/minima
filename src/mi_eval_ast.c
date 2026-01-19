@@ -399,33 +399,37 @@ MiRtCommandFn mi_cmd_find(MiRuntime* rt, XSlice name)
 
 static MiRtValue s_eval_command_expr(MiRuntime* rt, const MiExpr* expr)
 {
-  if (!expr || expr->kind != MI_EXPR_COMMAND)
-  {
-    return mi_rt_make_void();
-  }
+  (void) rt;
+  (void) expr;
+  //if (!expr || expr->kind != MI_EXPR_COMMAND)
+  //{
+  //  return mi_rt_make_void();
+  //}
 
-  MiRtValue head_val = mi_eval_expr_ast(rt, expr->as.command.head);
-  if (head_val.kind != MI_RT_VAL_STRING)
-  {
-    mi_error("command head is not a string\n");
-    return mi_rt_make_void();
-  }
+  //MiRtValue head_val = mi_eval_expr_ast(rt, expr->as.command.head);
+  //if (head_val.kind != MI_RT_VAL_STRING)
+  //{
+  //  mi_error("command head is not a string\n");
+  //  return mi_rt_make_void();
+  //}
 
-  XSlice head_name = head_val.as.s;
-  MiRtCommandFn fn = mi_cmd_find(rt, head_name);
-  if (!fn)
-  {
-    mi_error_fmt("unknown command: %.*s\n", (int)head_name.length, head_name.ptr);
-    return mi_rt_make_void();
-  }
+  //XSlice head_name = head_val.as.s;
+  //MiRtCommandFn fn = mi_cmd_find(rt, head_name);
+  //if (!fn)
+  //{
+  //  mi_error_fmt("unknown command: %.*s\n", (int)head_name.length, head_name.ptr);
+  //  return mi_rt_make_void();
+  //}
 
-  int argc = expr->as.command.argc;
-  if (argc <= 0)
-  {
-    return fn(rt, &head_name, 0, NULL);
-  }
+  //int argc = expr->as.command.argc;
+  //if (argc <= 0)
+  //{
+  //  return fn(rt, &head_name, 0, NULL);
+  //}
 
-  return fn(rt, &head_name, argc, expr->as.command.args);
+  //return fn(rt, &head_name, argc, expr->as.command.args);
+
+  return mi_rt_make_void();
 }
 
 static MiRtValue s_eval_command_node(MiRuntime* rt, const MiCommand* cmd)
@@ -533,7 +537,6 @@ static void s_fold_expr(MiRuntime* rt, MiExpr* expr)
       || expr->kind == MI_EXPR_FLOAT_LITERAL
       || expr->kind == MI_EXPR_STRING_LITERAL
       || expr->kind == MI_EXPR_BOOL_LITERAL
-      || expr->kind == MI_EXPR_COMMAND
       || expr->kind == MI_EXPR_VOID_LITERAL)
   {
     return;
@@ -555,6 +558,25 @@ static void s_fold_expr(MiRuntime* rt, MiExpr* expr)
     s_fold_expr(rt, expr->as.index.target);
     s_fold_expr(rt, expr->as.index.index);
   }
+  else if (expr->kind == MI_EXPR_COMMAND)
+  {
+    // Fold within the command head/arguments, but never evaluate the command
+    // itself during constant folding. Commands are runtime.
+    if (expr->as.command.head)
+    {
+      s_fold_expr(rt, expr->as.command.head);
+    }
+
+    MiExprList* it = expr->as.command.args;
+    while (it)
+    {
+      s_fold_expr(rt, it->expr);
+      it = it->next;
+    }
+
+    return;
+  }
+
   else if (expr->kind == MI_EXPR_LIST)
   {
     MiExprList* it = expr->as.list.items;

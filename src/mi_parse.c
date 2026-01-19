@@ -840,7 +840,8 @@ static MiExpr* s_parse_postfix(MiParser *p)
     }
 
 
-    MiExpr *cmd = s_new_expr(p, MI_EXPR_COMMAND, colon_tok, can_fold);
+    // Command expressions are a fold barrier: fold inside args, but never fold the command itself.
+    MiExpr *cmd = s_new_expr(p, MI_EXPR_COMMAND, colon_tok, false);
 
     if (!cmd)
     {
