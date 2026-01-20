@@ -5,9 +5,11 @@
 #define X_IMPL_ARENA
 #define X_IMPL_IO
 #define X_IMPL_LOG
+#define X_IMPL_FILESYSTEM
 
 #include <stdx_strbuilder.h>
 #include <stdx_string.h>
+#include <stdx_filesystem.h>
 #include <stdx_arena.h>
 #include <stdx_io.h>
 #include <stdx_log.h>
@@ -41,19 +43,6 @@ static bool s_has_ext(const char* path, const char* ext)
     return false;
   }
   return strcmp(path + (lp - le), ext) == 0;
-}
-
-static char* s_default_out_path(const char* in_path)
-{
-  size_t n = strlen(in_path);
-  char* out = (char*)malloc(n + 4 + 1);
-  if (!out)
-  {
-    return NULL;
-  }
-  memcpy(out, in_path, n);
-  memcpy(out + n, ".mx", 4);
-  return out;
 }
 
 //----------------------------------------------------------
@@ -213,26 +202,19 @@ int main(int argc, char** argv)
     }
 
     const char* in_file = argv[2];
-    const char* out_file = NULL;
-    char* owned_out = NULL;
+    XFSPath out_file;
 
     if (argc == 4)
     {
-      out_file = argv[3];
+      x_fs_path(&out_file, argv[3]);
     }
     else
     {
-      owned_out = s_default_out_path(in_file);
-      if (!owned_out)
-      {
-        mi_error("Out of memory\n");
-        return 1;
-      }
-      out_file = owned_out;
+      x_fs_path(&out_file, in_file);
+      x_fs_path_change_extension(&out_file, ".mx");
     }
 
-    int r = s_cmd_compile_only(in_file, out_file);
-    free(owned_out);
+    int r = s_cmd_compile_only(in_file, out_file.buf);
     return r;
   }
 
