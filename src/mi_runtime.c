@@ -69,6 +69,7 @@ static void* s_value_payload_ptr(MiRtValue v)
     case MI_RT_VAL_DICT:  return (void*)v.as.dict;
     case MI_RT_VAL_PAIR:  return (void*)v.as.pair;
     case MI_RT_VAL_BLOCK: return (void*)v.as.block;
+    case MI_RT_VAL_CMD:   return (void*)v.as.cmd;
     default:              return NULL;
   }
 }
@@ -127,6 +128,17 @@ static void s_value_pre_destroy(MiRuntime* rt, MiRtValue v)
   else if (v.kind == MI_RT_VAL_BLOCK && v.as.block)
   {
     /* Blocks currently don't own their env/payload memory. */
+  }
+  else if (v.kind == MI_RT_VAL_CMD && v.as.cmd)
+  {
+    MiRtCmd* c = v.as.cmd;
+    mi_rt_value_release(rt, c->body);
+    if (c->param_names)
+    {
+      mi_heap_release_payload(&rt->heap, c->param_names);
+      c->param_names = NULL;
+      c->param_count = 0u;
+    }
   }
 }
 
@@ -338,6 +350,37 @@ void mi_rt_scope_push_with_parent(MiRuntime* rt, MiScopeFrame* parent)
   rt->current = f;
 }
 
+MiScopeFrame* mi_rt_scope_create_detached(MiRuntime* rt, MiScopeFrame* parent)
+{
+  if (!rt)
+  {
+    return NULL;
+  }
+
+  MiScopeFrame* f = (MiScopeFrame*)s_realloc(NULL, sizeof(MiScopeFrame));
+  s_scope_init(f, rt->scope_chunk_size, parent);
+  return f;
+}
+
+void mi_rt_scope_destroy_detached(MiRuntime* rt, MiScopeFrame* frame)
+{
+  if (!rt || !frame || frame == &rt->root)
+  {
+    return;
+  }
+
+  /* Release values stored in this frame before freeing heap objects. */
+  MiRtVar* it = frame->vars;
+  while (it)
+  {
+    mi_rt_value_release(rt, it->value);
+    it = it->next;
+  }
+
+  x_arena_destroy(frame->arena);
+  free(frame);
+}
+
 void mi_rt_scope_pop(MiRuntime* rt)
 {
   if (!rt || !rt->current || rt->current == &rt->root)
@@ -383,6 +426,25 @@ bool mi_rt_var_get(const MiRuntime* rt, XSlice name, MiRtValue* out_value)
     f = f->parent;
   }
 
+  return false;
+}
+
+bool mi_rt_var_get_from(const MiScopeFrame* start, XSlice name, MiRtValue* out_value)
+{
+  const MiScopeFrame* f = start;
+  while (f)
+  {
+    MiRtVar* v = s_var_find_in_frame(f, name);
+    if (v)
+    {
+      if (out_value)
+      {
+        *out_value = v->value;
+      }
+      return true;
+    }
+    f = f->parent;
+  }
   return false;
 }
 
@@ -895,6 +957,44 @@ MiRtBlock* mi_rt_block_create(MiRuntime* rt)
   return b;
 }
 
+MiRtCmd* mi_rt_cmd_create(MiRuntime* rt, uint32_t param_count, const XSlice* param_names, MiRtValue body)
+{
+  if (!rt)
+  {
+    return NULL;
+  }
+
+  MiRtCmd* c = (MiRtCmd*)mi_heap_alloc_obj(&rt->heap, MI_OBJ_CMD, sizeof(MiRtCmd));
+  if (!c)
+  {
+    mi_error("mi_runtime: out of memory\n");
+    exit(1);
+  }
+
+  memset(c, 0, sizeof(*c));
+  c->param_count = param_count;
+  c->param_names = NULL;
+  c->body = mi_rt_make_void();
+
+  if (param_count > 0u)
+  {
+    XSlice* pn = (XSlice*)mi_heap_alloc_buffer(&rt->heap, (size_t)param_count * sizeof(XSlice));
+    if (!pn)
+    {
+      mi_error("mi_runtime: out of memory\n");
+      exit(1);
+    }
+    for (uint32_t i = 0; i < param_count; ++i)
+    {
+      pn[i] = param_names[i];
+    }
+    c->param_names = pn;
+  }
+
+  mi_rt_value_assign(rt, &c->body, body);
+  return c;
+}
+
 bool mi_rt_list_push(MiRtList* list, MiRtValue v)
 {
   if (!list)
@@ -928,7 +1028,9 @@ bool mi_rt_list_push(MiRtList* list, MiRtValue v)
   mi_heap_retain_payload(
       (v.kind == MI_RT_VAL_LIST)  ? (void*)v.as.list :
       (v.kind == MI_RT_VAL_PAIR)  ? (void*)v.as.pair :
+      (v.kind == MI_RT_VAL_DICT)  ? (void*)v.as.dict :
       (v.kind == MI_RT_VAL_BLOCK) ? (void*)v.as.block :
+      (v.kind == MI_RT_VAL_CMD)   ? (void*)v.as.cmd :
       NULL);
 
   list->items[list->count] = v;
@@ -1013,6 +1115,14 @@ MiRtValue mi_rt_make_block(MiRtBlock* block)
   MiRtValue out;
   out.kind = MI_RT_VAL_BLOCK;
   out.as.block = block;
+  return out;
+}
+
+MiRtValue mi_rt_make_cmd(MiRtCmd* cmd)
+{
+  MiRtValue out;
+  out.kind = MI_RT_VAL_CMD;
+  out.as.cmd = cmd;
   return out;
 }
 

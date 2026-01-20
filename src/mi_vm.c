@@ -1,6 +1,7 @@
 #include "mi_vm.h"
 #include "mi_log.h"
 #include "mi_fold.h"
+#include "mi_mix.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -117,6 +118,7 @@ static const char* s_vm_kind_name(MiRtValueKind kind)
     case MI_RT_VAL_LIST:   return "list";
     case MI_RT_VAL_DICT:   return "dict";
     case MI_RT_VAL_BLOCK:  return "block";
+    case MI_RT_VAL_CMD:    return "cmd";
     case MI_RT_VAL_KVREF:  return "kvref";
     case MI_RT_VAL_PAIR:   return "pair";
     case MI_RT_VAL_TYPE:   return "type";
@@ -661,6 +663,68 @@ static MiRtValue s_vm_cmd_call(MiVm* vm, XSlice name, int argc, const MiRtValue*
   return s_vm_exec_block_value(vm, argv[0], vm->dbg_chunk, vm->dbg_ip);
 }
 
+static MiRtValue s_vm_exec_cmd_value(MiVm* vm, XSlice cmd_name, MiRtValue cmd_value, int argc, const MiRtValue* argv)
+{
+  if (!vm || !vm->rt)
+  {
+    return mi_rt_make_void();
+  }
+
+  if (cmd_value.kind != MI_RT_VAL_CMD || !cmd_value.as.cmd)
+  {
+    return mi_rt_make_void();
+  }
+
+  MiRtCmd* c = cmd_value.as.cmd;
+  if (c->body.kind != MI_RT_VAL_BLOCK || !c->body.as.block || c->body.as.block->kind != MI_RT_BLOCK_VM_CHUNK)
+  {
+    mi_error("mi_vm: invalid cmd body\n");
+    return mi_rt_make_void();
+  }
+
+  if ((uint32_t)argc != c->param_count)
+  {
+    mi_error_fmt("%.*s: expected %u args, got %d\n", (int)cmd_name.length, cmd_name.ptr, (unsigned)c->param_count, argc);
+    return mi_rt_make_void();
+  }
+
+  MiRtBlock* b = c->body.as.block;
+  MiVmChunk* sub = (MiVmChunk*)b->ptr;
+  MiScopeFrame* caller = vm->rt->current;
+  MiScopeFrame* parent = b->env ? b->env : caller;
+
+  /* Preserve VM-reserved regs across call (same as call:). */
+  MiRtValue saved_vm_regs[7];
+  for (int i = 0; i < 7; ++i)
+  {
+    saved_vm_regs[i] = vm->regs[1 + i];
+    mi_rt_value_retain(vm->rt, saved_vm_regs[i]);
+  }
+
+  mi_rt_scope_push_with_parent(vm->rt, parent);
+
+  for (uint32_t i = 0; i < c->param_count; ++i)
+  {
+    (void)mi_rt_var_define(vm->rt, c->param_names[i], argv[(int)i]);
+  }
+
+  s_vm_call_stack_push(vm, MI_VM_CALL_FRAME_USER_CMD, cmd_name, vm->dbg_chunk, vm->dbg_ip);
+  MiRtValue ret = mi_vm_execute(vm, sub);
+  s_vm_call_stack_pop(vm);
+
+  mi_rt_scope_pop(vm->rt);
+  vm->rt->current = caller;
+
+  for (int i = 0; i < 7; ++i)
+  {
+    mi_rt_value_assign(vm->rt, &vm->regs[1 + i], saved_vm_regs[i]);
+    mi_rt_value_release(vm->rt, saved_vm_regs[i]);
+  }
+  s_vm_arg_clear(vm);
+
+  return ret;
+}
+
 static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value, const MiVmChunk* caller_chunk, size_t caller_ip)
 {
   if (!vm || !vm->rt)
@@ -713,127 +777,6 @@ static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value, const Mi
   s_vm_arg_clear(vm);
 
   s_vm_call_stack_pop(vm);
-
-  return ret;
-}
-
-//----------------------------------------------------------
-// User-defined commands
-//----------------------------------------------------------
-
-static MiVmUserCommand* s_vm_find_user_cmd(MiVm* vm, XSlice name)
-{
-  if (!vm)
-  {
-    return NULL;
-  }
-
-  for (size_t i = 0; i < vm->user_cmd_count; ++i)
-  {
-    if (s_slice_eq(vm->user_cmds[i].name, name))
-    {
-      return &vm->user_cmds[i];
-    }
-  }
-
-  return NULL;
-}
-
-static void s_vm_free_user_cmd(MiVm* vm, MiVmUserCommand* c)
-{
-  if (!vm || !c)
-  {
-    return;
-  }
-
-  if (c->defaults)
-  {
-    for (uint32_t i = 0; i < c->param_count; ++i)
-    {
-      mi_rt_value_release(vm->rt, c->defaults[i]);
-    }
-  }
-  free(c->param_names);
-  free(c->defaults);
-  c->param_names = NULL;
-  c->defaults = NULL;
-  c->param_count = 0;
-
-  mi_rt_value_release(vm->rt, c->body);
-  c->body = mi_rt_make_void();
-}
-
-static MiRtValue s_vm_cmd_user(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
-{
-  if (!vm || !vm->rt)
-  {
-    return mi_rt_make_void();
-  }
-
-  MiVmUserCommand* c = s_vm_find_user_cmd(vm, name);
-  if (!c)
-  {
-    mi_error_fmt("mi_vm: user command not found: %.*s\n", (int)name.length, name.ptr);
-    return mi_rt_make_void();
-  }
-
-  /* Command body is a VM block that captures its defining environment. */
-  if (c->body.kind != MI_RT_VAL_BLOCK || !c->body.as.block || c->body.as.block->kind != MI_RT_BLOCK_VM_CHUNK)
-  {
-    mi_error("mi_vm: invalid user command body\n");
-    return mi_rt_make_void();
-  }
-
-  MiRtBlock* b = c->body.as.block;
-  MiVmChunk* sub = (MiVmChunk*)b->ptr;
-  MiScopeFrame* caller = vm->rt->current;
-  MiScopeFrame* parent = b->env ? b->env : caller;
-
-  /* Preserve VM-reserved regs across call (same as call:). */
-  MiRtValue saved_vm_regs[7];
-  for (int i = 0; i < 7; ++i)
-  {
-    saved_vm_regs[i] = vm->regs[1 + i];
-    mi_rt_value_retain(vm->rt, saved_vm_regs[i]);
-  }
-
-  mi_rt_scope_push_with_parent(vm->rt, parent);
-
-    /* Strict arity: user commands are fixed-arity for now. */
-  if ((uint32_t)argc != c->param_count)
-  {
-    mi_error_fmt("%.*s: expected %u args, got %d\n", (int)name.length, name.ptr, (unsigned)c->param_count, argc);
-    mi_rt_scope_pop(vm->rt);
-    vm->rt->current = caller;
-    for (int i = 0; i < 7; ++i)
-    {
-      mi_rt_value_assign(vm->rt, &vm->regs[1 + i], saved_vm_regs[i]);
-      mi_rt_value_release(vm->rt, saved_vm_regs[i]);
-    }
-    s_vm_arg_clear(vm);
-    return mi_rt_make_void();
-  }
-
-  /* Bind parameters as locals in the command's scope. */
-  for (uint32_t i = 0; i < c->param_count; ++i)
-  {
-    (void)mi_rt_var_define(vm->rt, c->param_names[i], argv[(int)i]);
-  }
-
-  s_vm_call_stack_push(vm, MI_VM_CALL_FRAME_USER_CMD, name, vm->dbg_chunk, vm->dbg_ip);
-
-  MiRtValue ret = mi_vm_execute(vm, sub);
-  mi_rt_scope_pop(vm->rt);
-  vm->rt->current = caller;
-
-  s_vm_call_stack_pop(vm);
-
-  for (int i = 0; i < 7; ++i)
-  {
-    mi_rt_value_assign(vm->rt, &vm->regs[1 + i], saved_vm_regs[i]);
-    mi_rt_value_release(vm->rt, saved_vm_regs[i]);
-  }
-  s_vm_arg_clear(vm);
 
   return ret;
 }
@@ -895,36 +838,223 @@ static MiRtValue s_vm_cmd_cmd(MiVm* vm, XSlice name, int argc, const MiRtValue* 
     param_names[i] = pn.as.s;
   }
 
-  /* Replace existing definition if present, otherwise add. */
-  MiVmUserCommand* existing = s_vm_find_user_cmd(vm, argv[0].as.s);
-  if (existing)
+  MiRtCmd* c = mi_rt_cmd_create(vm->rt, param_count, param_names, body);
+  free(param_names);
+  if (!c)
   {
-    s_vm_free_user_cmd(vm, existing);
-    existing->param_count = param_count;
-    existing->param_names = param_names;
-    existing->body = body;
-    mi_rt_value_retain(vm->rt, existing->body);
-    (void) mi_vm_register_command(vm, argv[0].as.s, s_vm_cmd_user);
+    mi_error("cmd: out of memory\n");
     return mi_rt_make_void();
   }
 
-  if (vm->user_cmd_count == vm->user_cmd_capacity)
+  /* Store command object in the current scope. */
+  (void)mi_rt_var_set(vm->rt, argv[0].as.s, mi_rt_make_cmd(c));
+  return mi_rt_make_void();
+}
+
+static bool s_slice_ends_with(XSlice s, const char* suffix)
+{
+  if (!suffix)
   {
-    size_t new_cap = vm->user_cmd_capacity ? vm->user_cmd_capacity * 2u : 32u;
-    vm->user_cmds = (MiVmUserCommand*)s_realloc(vm->user_cmds, new_cap * sizeof(*vm->user_cmds));
-    vm->user_cmd_capacity = new_cap;
+    return false;
+  }
+  size_t n = strlen(suffix);
+  if ((size_t)s.length < n)
+  {
+    return false;
+  }
+  const char* p = (const char*)s.ptr;
+  return memcmp(p + (s.length - n), suffix, n) == 0;
+}
+
+static bool s_slice_find_double_colon(XSlice s, size_t start, size_t* out_index)
+{
+  const char* p = (const char*)s.ptr;
+  size_t n = s.length;
+  if (start >= n)
+  {
+    return false;
+  }
+  for (size_t i = start; i + 1u < n; ++i)
+  {
+    if (p[i] == ':' && p[i + 1u] == ':')
+    {
+      if (out_index)
+      {
+        *out_index = i;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+static MiRtValue s_vm_exec_qualified_cmd(MiVm* vm, XSlice full_name, int argc, const MiRtValue* argv, bool* out_ok)
+{
+  if (out_ok)
+  {
+    *out_ok = false;
+  }
+  if (!vm || !vm->rt)
+  {
+    return mi_rt_make_void();
   }
 
-  MiVmUserCommand* c = &vm->user_cmds[vm->user_cmd_count++];
-  memset(c, 0, sizeof(*c));
-  c->name = argv[0].as.s;
-  c->param_count = param_count;
-  c->param_names = param_names;
-  c->body = body;
-  mi_rt_value_retain(vm->rt, c->body);
+  size_t i0 = 0u;
+  size_t dc = 0u;
+  if (!s_slice_find_double_colon(full_name, 0u, &dc))
+  {
+    return mi_rt_make_void();
+  }
 
-  (void) mi_vm_register_command(vm, c->name, s_vm_cmd_user);
+  /* Resolve first segment from current scope chain. */
+  XSlice seg = { full_name.ptr, dc };
+  MiRtValue cur = mi_rt_make_void();
+  if (!mi_rt_var_get(vm->rt, seg, &cur))
+  {
+    mi_error_fmt("%.*s: unknown module/namespace '%.*s'\n", (int)full_name.length, (const char*)full_name.ptr, (int)seg.length, (const char*)seg.ptr);
+    return mi_rt_make_void();
+  }
+
+  /* Walk remaining segments inside chunk environments. */
+  i0 = dc + 2u;
+  while (i0 < full_name.length)
+  {
+    size_t next_dc = 0u;
+    bool has_next = s_slice_find_double_colon(full_name, i0, &next_dc);
+    size_t seg_len = has_next ? (next_dc - i0) : (full_name.length - i0);
+    XSlice name = { (const char*)full_name.ptr + i0, seg_len };
+
+    if (cur.kind != MI_RT_VAL_BLOCK || !cur.as.block || !cur.as.block->env)
+    {
+      mi_error_fmt("%.*s: '%.*s' is not a chunk/module\n", (int)full_name.length, (const char*)full_name.ptr, (int)seg.length, (const char*)seg.ptr);
+      return mi_rt_make_void();
+    }
+
+    MiRtValue v = mi_rt_make_void();
+    if (!mi_rt_var_get_from(cur.as.block->env, name, &v))
+    {
+      mi_error_fmt("%.*s: unknown member '%.*s'\n", (int)full_name.length, (const char*)full_name.ptr, (int)name.length, (const char*)name.ptr);
+      return mi_rt_make_void();
+    }
+
+    if (!has_next)
+    {
+      if (v.kind != MI_RT_VAL_CMD)
+      {
+        mi_error_fmt("%.*s: '%.*s' is not a command\n", (int)full_name.length, (const char*)full_name.ptr, (int)name.length, (const char*)name.ptr);
+        return mi_rt_make_void();
+      }
+      if (out_ok)
+      {
+        *out_ok = true;
+      }
+      return s_vm_exec_cmd_value(vm, full_name, v, argc, argv);
+    }
+
+    /* Continue chaining through nested chunks. */
+    cur = v;
+    seg = name;
+    i0 = next_dc + 2u;
+  }
+
   return mi_rt_make_void();
+}
+
+static MiRtValue s_vm_cmd_include(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+{
+  (void)name;
+  if (!vm || !vm->rt)
+  {
+    return mi_rt_make_void();
+  }
+
+  if (argc != 3)
+  {
+    mi_error("include: expected: include: <module> as <alias>\n");
+    return mi_rt_make_void();
+  }
+
+  if (argv[0].kind != MI_RT_VAL_STRING || argv[1].kind != MI_RT_VAL_STRING || argv[2].kind != MI_RT_VAL_STRING)
+  {
+    mi_error("include: arguments must be strings\n");
+    return mi_rt_make_void();
+  }
+
+  if (!s_slice_eq(argv[1].as.s, x_slice_from_cstr("as")))
+  {
+    mi_error("include: expected second argument to be 'as'\n");
+    return mi_rt_make_void();
+  }
+
+  XSlice module = argv[0].as.s;
+  XSlice alias = argv[2].as.s;
+
+  char* filename = NULL;
+  if (s_slice_ends_with(module, ".mx"))
+  {
+    filename = (char*)calloc(module.length + 1u, 1u);
+    if (!filename)
+    {
+      mi_error("include: out of memory\n");
+      return mi_rt_make_void();
+    }
+    memcpy(filename, module.ptr, module.length);
+  }
+  else
+  {
+    filename = (char*)calloc(module.length + 1u + 3u, 1u);
+    if (!filename)
+    {
+      mi_error("include: out of memory\n");
+      return mi_rt_make_void();
+    }
+    memcpy(filename, module.ptr, module.length);
+    memcpy(filename + module.length, ".mx", 3u);
+  }
+
+  MiMixProgram prog;
+  memset(&prog, 0, sizeof(prog));
+  if (!mi_mix_load_file(vm, filename, &prog))
+  {
+    mi_error_fmt("include: failed to load module: %s\n", filename);
+    free(filename);
+    return mi_rt_make_void();
+  }
+  free(filename);
+
+  /* Track loaded module so it can be freed on VM shutdown. */
+  if (vm->module_count == vm->module_capacity)
+  {
+    size_t new_cap = vm->module_capacity ? vm->module_capacity * 2u : 8u;
+    vm->modules = (MiMixProgram*)s_realloc(vm->modules, new_cap * sizeof(*vm->modules));
+    vm->module_capacity = new_cap;
+  }
+  vm->modules[vm->module_count] = prog;
+  vm->module_count += 1u;
+
+  /* Create a detached environment for the module, run its top-level, then bind alias to a block capturing that env. */
+  MiScopeFrame* env = mi_rt_scope_create_detached(vm->rt, NULL);
+  if (vm->module_env_count == vm->module_env_capacity)
+  {
+    size_t new_cap = vm->module_env_capacity ? vm->module_env_capacity * 2u : 8u;
+    vm->module_envs = (MiScopeFrame**)s_realloc(vm->module_envs, new_cap * sizeof(*vm->module_envs));
+    vm->module_env_capacity = new_cap;
+  }
+  vm->module_envs[vm->module_env_count++] = env;
+
+  MiScopeFrame* saved = vm->rt->current;
+  vm->rt->current = env;
+  (void)mi_vm_execute(vm, prog.entry);
+  vm->rt->current = saved;
+
+  MiRtBlock* b = mi_rt_block_create(vm->rt);
+  b->kind = MI_RT_BLOCK_VM_CHUNK;
+  b->ptr = (void*)prog.entry;
+  b->env = env;
+
+  MiRtValue block_v = mi_rt_make_block(b);
+  (void)mi_rt_var_set(vm->rt, alias, block_v);
+  return block_v;
 }
 
 
@@ -971,6 +1101,7 @@ void mi_vm_init(MiVm* vm, MiRuntime* rt)
   (void) mi_vm_register_command(vm, x_slice_from_cstr("dict"),  s_vm_cmd_dict);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("len"),   s_vm_cmd_len);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("cmd"),   s_vm_cmd_cmd);
+  (void) mi_vm_register_command(vm, x_slice_from_cstr("include"), s_vm_cmd_include);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("trace"), s_vm_cmd_trace);
 }
 
@@ -993,14 +1124,29 @@ void mi_vm_shutdown(MiVm* vm)
   vm->command_count = 0;
   vm->command_capacity = 0;
 
-  for (size_t i = 0; i < vm->user_cmd_count; ++i)
+  if (vm->modules)
   {
-    s_vm_free_user_cmd(vm, &vm->user_cmds[i]);
+    for (size_t i = 0; i < vm->module_count; ++i)
+    {
+      mi_mix_program_destroy(&vm->modules[i]);
+    }
+    free(vm->modules);
   }
-  free(vm->user_cmds);
-  vm->user_cmds = NULL;
-  vm->user_cmd_count = 0;
-  vm->user_cmd_capacity = 0;
+  vm->modules = NULL;
+  vm->module_count = 0u;
+  vm->module_capacity = 0u;
+
+  if (vm->module_envs)
+  {
+    for (size_t i = 0; i < vm->module_env_count; ++i)
+    {
+      mi_rt_scope_destroy_detached(vm->rt, vm->module_envs[i]);
+    }
+    free(vm->module_envs);
+  }
+  vm->module_envs = NULL;
+  vm->module_env_count = 0u;
+  vm->module_env_capacity = 0u;
 }
 
 bool mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn)
@@ -3097,6 +3243,35 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           }
           vm->arg_top = base;
 
+          XSlice cmd_name = chunk->cmd_names[ins.imm];
+
+          /* Qualified call: a::b(:) ... resolved through chunk environments. */
+          bool q_ok = false;
+          MiRtValue q_ret = s_vm_exec_qualified_cmd(vm, cmd_name, argc, argv, &q_ok);
+          if (q_ok)
+          {
+            s_vm_reg_set(vm, ins.a, q_ret);
+            for (int i = 0; i < argc; i += 1)
+            {
+              mi_rt_value_release(vm->rt, argv[i]);
+            }
+            mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
+            break;
+          }
+
+          /* Scoped commands: a local var may shadow a builtin. */
+          MiRtValue scoped = mi_rt_make_void();
+          if (mi_rt_var_get(vm->rt, cmd_name, &scoped) && scoped.kind == MI_RT_VAL_CMD)
+          {
+            s_vm_reg_set(vm, ins.a, s_vm_exec_cmd_value(vm, cmd_name, scoped, argc, argv));
+            for (int i = 0; i < argc; i += 1)
+            {
+              mi_rt_value_release(vm->rt, argv[i]);
+            }
+            mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
+            break;
+          }
+
           MiVmCommandFn fn = chunk->cmd_fns[ins.imm];
           if (!fn)
           {
@@ -3108,8 +3283,6 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             }
             break;
           }
-
-          XSlice cmd_name = chunk->cmd_names[ins.imm];
           s_vm_reg_set(vm, ins.a, fn(vm, cmd_name, argc, argv));
           for (int i = 0; i < argc; i += 1)
           {
@@ -3149,19 +3322,42 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           }
           vm->arg_top = base;
 
-          MiVmCommandFn fn = s_vm_find_command_fn(vm, head.as.s);
-          if (!fn)
+          /* Qualified call for dynamic heads. */
+          bool q_ok = false;
+          MiRtValue q_ret = s_vm_exec_qualified_cmd(vm, head.as.s, argc, argv, &q_ok);
+          if (q_ok)
           {
-            mi_error_fmt("mi_vm: unknown command: %.*s\n", (int)head.as.s.length, head.as.s.ptr);
-            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+            s_vm_reg_set(vm, ins.a, q_ret);
             for (int i = 0; i < argc; i += 1)
             {
               mi_rt_value_release(vm->rt, argv[i]);
             }
+            mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
             break;
           }
 
-          s_vm_reg_set(vm, ins.a, fn(vm, head.as.s, argc, argv));
+          /* First: scoped commands stored as variables. */
+          MiRtValue scoped = mi_rt_make_void();
+          if (mi_rt_var_get(vm->rt, head.as.s, &scoped) && scoped.kind == MI_RT_VAL_CMD)
+          {
+            s_vm_reg_set(vm, ins.a, s_vm_exec_cmd_value(vm, head.as.s, scoped, argc, argv));
+          }
+          else
+          {
+            MiVmCommandFn fn = s_vm_find_command_fn(vm, head.as.s);
+            if (!fn)
+            {
+              mi_error_fmt("mi_vm: unknown command: %.*s\n", (int)head.as.s.length, head.as.s.ptr);
+              s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+              for (int i = 0; i < argc; i += 1)
+              {
+                mi_rt_value_release(vm->rt, argv[i]);
+              }
+              break;
+            }
+
+            s_vm_reg_set(vm, ins.a, fn(vm, head.as.s, argc, argv));
+          }
           for (int i = 0; i < argc; i += 1)
           {
             mi_rt_value_release(vm->rt, argv[i]);

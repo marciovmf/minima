@@ -42,6 +42,16 @@ static char s_lexer_peek(MiLexer *lx)
   return lx->src[lx->pos];
 }
 
+static char s_lexer_peek_off(MiLexer *lx, size_t off)
+{
+  size_t p = lx->pos + off;
+  if (p >= lx->length)
+  {
+    return '\0';
+  }
+  return lx->src[p];
+}
+
 static char s_lexer_advance(MiLexer *lx)
 {
   if (s_lexer_is_eof(lx))
@@ -202,16 +212,7 @@ static MiToken s_lexer_next(MiLexer *lx)
     case '{' : return s_make_token(MI_TOK_LBRACE,    start, 1, line, column);
     case '}' : return s_make_token(MI_TOK_RBRACE,    start, 1, line, column);
     case ',' : return s_make_token(MI_TOK_COMMA,     start, 1, line, column);
-    case ':' :
-               {
-                 if (s_lexer_peek(lx) == ':')
-                 {
-                   // '::' is no longer a valid command separator.
-                   s_lexer_advance(lx);
-                   return s_make_token(MI_TOK_ERROR, start, 2, line, column);
-                 }
-                 return s_make_token(MI_TOK_COLON, start, 1, line, column);
-               }
+    case ':' : return s_make_token(MI_TOK_COLON,     start, 1, line, column);
     case '$' : return s_make_token(MI_TOK_DOLLAR,    start, 1, line, column);
     case '+' : return s_make_token(MI_TOK_PLUS,      start, 1, line, column);
     case '-' : return s_make_token(MI_TOK_MINUS,     start, 1, line, column);
@@ -295,9 +296,29 @@ static MiToken s_lexer_next(MiLexer *lx)
   // Identifiers and keywords
   if (s_is_ident_start(c))
   {
-    while (!s_lexer_is_eof(lx) && s_is_ident_part(s_lexer_peek(lx)))
+    while (!s_lexer_is_eof(lx))
     {
-      s_lexer_advance(lx);
+      char d = s_lexer_peek(lx);
+
+      if (s_is_ident_part(d))
+      {
+        s_lexer_advance(lx);
+        continue;
+      }
+
+      /* Allow qualified identifiers with '::' (no spaces) as part of one token.
+         This makes heads like 'f::greet:' lex as a single MI_TOK_IDENTIFIER.
+       */
+      if (d == ':' &&
+          s_lexer_peek_off(lx, 1) == ':' &&
+          s_is_ident_start(s_lexer_peek_off(lx, 2)))
+      {
+        s_lexer_advance(lx);
+        s_lexer_advance(lx);
+        continue;
+      }
+
+      break;
     }
 
     size_t len = (lx->src + lx->pos) - start;
@@ -1550,13 +1571,67 @@ static MiExpr* s_parse_primary(MiParser *p)
 
     case MI_TOK_IDENTIFIER:
       {
+        /*
+         * Qualified names: ident (:: ident)*
+         *
+         * We support '::' inside identifiers for qualified command heads:
+         *   filesystem::create_dir:
+         *
+         * Parser behavior:
+         *   - merges ident (:: ident)* into a single MI_TOK_IDENTIFIER token
+         *   - the resulting expression is still a string literal, so the
+         *     rest of the parser/compiler does not need a new AST node.
+         */
+        MiToken merged = tok;
+        MiToken last = tok;
+
         s_parser_advance(p);
-        MiExpr *e = s_new_expr(p, MI_EXPR_STRING_LITERAL, tok, true);
+
+        for (;;)
+        {
+          MiToken dc = s_parser_peek(p);
+          if (dc.kind != MI_TOK_DOUBLE_COLON)
+          {
+            break;
+          }
+
+          if (!s_tokens_adjacent(&last, &dc))
+          {
+            break;
+          }
+
+          /* Consume '::' */
+          s_parser_advance(p);
+
+          MiToken ident = s_parser_peek(p);
+          if (ident.kind != MI_TOK_IDENTIFIER)
+          {
+            s_parser_set_error(p, "Expected identifier after '::'", ident);
+            return NULL;
+          }
+
+          if (!s_tokens_adjacent(&dc, &ident))
+          {
+            s_parser_set_error(p, "No spaces allowed around '::'", ident);
+            return NULL;
+          }
+
+          /* Consume identifier */
+          s_parser_advance(p);
+
+          const char* start = (const char*)merged.lexeme.ptr;
+          const char* end = (const char*)ident.lexeme.ptr + ident.lexeme.length;
+          merged.lexeme.ptr = (const void*)start;
+          merged.lexeme.length = (size_t)(end - start);
+          last = ident;
+        }
+
+        MiExpr *e = s_new_expr(p, MI_EXPR_STRING_LITERAL, merged, true);
         if (!e)
         {
           return NULL;
         }
-        e->as.string_lit.value = tok.lexeme;
+        e->as.string_lit.value = merged.lexeme;
         return e;
       }
 

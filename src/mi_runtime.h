@@ -21,6 +21,7 @@ typedef struct MiRtList MiRtList;
 typedef struct MiRtPair MiRtPair;
 typedef struct MiRtDict MiRtDict;
 typedef struct MiRtBlock MiRtBlock;
+typedef struct MiRtCmd MiRtCmd;
 typedef struct MiScopeFrame MiScopeFrame;
 
 typedef struct MiRtKvRef
@@ -40,6 +41,7 @@ typedef enum MiRtValueKind
   MI_RT_VAL_DICT,
   MI_RT_VAL_KVREF,
   MI_RT_VAL_BLOCK,
+  MI_RT_VAL_CMD,
   MI_RT_VAL_PAIR,
   MI_RT_VAL_TYPE
 } MiRtValueKind;
@@ -59,7 +61,15 @@ struct MiRtValue
     MiRtDict*  dict;
     MiRtKvRef   kvref;
     MiRtBlock* block;
+    MiRtCmd*   cmd;
   } as;
+};
+
+struct MiRtCmd
+{
+  uint32_t  param_count;
+  XSlice*   param_names; /* heap buffer owned by cmd */
+  MiRtValue body;        /* MI_RT_VAL_BLOCK (retained) */
 };
 
 typedef struct MiRtDictEntry
@@ -117,6 +127,10 @@ typedef struct MiRtVar
   MiRtValue         value;
   struct MiRtVar*   next;
 } MiRtVar;
+
+/* Create/destroy detached scope frames (not tied to rt->current push/pop). */
+MiScopeFrame* mi_rt_scope_create(MiRuntime* rt, MiScopeFrame* parent);
+void          mi_rt_scope_destroy(MiRuntime* rt, MiScopeFrame* frame);
 
 typedef struct MiScopeFrame
 {
@@ -226,6 +240,9 @@ void mi_rt_scope_pop(MiRuntime* rt);
  */
 bool mi_rt_var_get(const MiRuntime* rt, XSlice name, MiRtValue* out_value);
 
+/* Look up a variable starting from an explicit scope frame (walks parent chain). */
+bool mi_rt_var_get_from(const MiScopeFrame* start, XSlice name, MiRtValue* out_value);
+
 /**
  * Set a variable value in the nearest enclosing scope.
  * If the variable does not exist, it is created in the current scope.
@@ -303,6 +320,7 @@ void mi_rt_pair_set(MiRuntime* rt, MiRtPair* pair, int index, MiRtValue v);
  * @return   Newly created block.
  */
 MiRtBlock* mi_rt_block_create(MiRuntime* rt);
+MiRtCmd*   mi_rt_cmd_create(MiRuntime* rt, uint32_t param_count, const XSlice* param_names, MiRtValue body);
 
 /**
  * Append a value to a runtime list.
@@ -383,6 +401,7 @@ MiRtValue mi_rt_make_pair(MiRtPair* pair);
  * @return      Block runtime value.
  */
 MiRtValue mi_rt_make_block(MiRtBlock* block);
+MiRtValue mi_rt_make_cmd(MiRtCmd* cmd);
 
 /**
  * Create a type-token runtime value.
@@ -391,6 +410,12 @@ MiRtValue mi_rt_make_block(MiRtBlock* block);
  * @return     Type-token runtime value.
  */
 MiRtValue mi_rt_make_type(MiRtValueKind kind);
+
+/* Create/destroy a detached scope frame.
+   Detached scopes are used for module environments: they are not managed by
+   mi_rt_scope_push/pop, and must be destroyed explicitly. */
+MiScopeFrame* mi_rt_scope_create_detached(MiRuntime* rt, MiScopeFrame* parent);
+void          mi_rt_scope_destroy_detached(MiRuntime* rt, MiScopeFrame* frame);
 
 
 #endif // MI_RUNTIME_H

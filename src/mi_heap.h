@@ -17,6 +17,7 @@ typedef enum MiObjKind
   MI_OBJ_PAIR,
   MI_OBJ_DICT,
   MI_OBJ_BLOCK,
+  MI_OBJ_CMD,
   MI_OBJ_BUFFER
 } MiObjKind;
 

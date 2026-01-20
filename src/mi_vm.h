@@ -173,9 +173,14 @@ struct MiVm
   size_t            command_count;
   size_t            command_capacity;
 
-  MiVmUserCommand*  user_cmds;
-  size_t            user_cmd_count;
-  size_t            user_cmd_capacity;
+  /* Loaded modules (include:). */
+  struct MiMixProgram* modules;
+  size_t               module_count;
+  size_t               module_capacity;
+
+  MiScopeFrame**       module_envs;
+  size_t               module_env_count;
+  size_t               module_env_capacity;
 
   // Working state (execution).
   MiRtValue regs[MI_VM_REG_COUNT];
