@@ -21,15 +21,21 @@ endfunction()
 set(STDX_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/src/include")
 
 list(APPEND SOURCES 
-  ${CMAKE_CURRENT_LIST_DIR}/src/mi_bytecode.c
-  ${CMAKE_CURRENT_LIST_DIR}/src/mi_compile.c
-  ${CMAKE_CURRENT_LIST_DIR}/src/mi_parse.c
-  ${CMAKE_CURRENT_LIST_DIR}/src/mi_eval_ast.c
-  ${CMAKE_CURRENT_LIST_DIR}/src/mi_runtime.c
-  ${CMAKE_CURRENT_LIST_DIR}/src/mi_heap.c
-  ${CMAKE_CURRENT_LIST_DIR}/src/mi_vm.c
-  ${CMAKE_CURRENT_LIST_DIR}/src/mi_mix.c
   ${CMAKE_CURRENT_LIST_DIR}/src/main.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_compile.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_compile.h
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_fold.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_fold.h
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_heap.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_heap.h
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_mx.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_mx.h
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_parse.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_parse.h
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_runtime.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_runtime.h
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_vm.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_vm.h
 )
 
 if(MSVC)

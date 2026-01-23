@@ -92,7 +92,7 @@ static int s_cmd_compile_only(const char* in_file, const char* out_file)
     return 1;
   }
 
-  MiVmChunk* ch = mi_compile_vm_script_ex(&vm, res.script, x_slice_from_cstr("<script>"), x_slice_from_cstr(in_file));
+  MiVmChunk* ch = mi_compile_vm_script(&vm, res.script);
   x_arena_destroy(arena);
   if (!ch)
   {
@@ -187,11 +187,7 @@ static int s_cmd_run_source(const char* mi_file)
     return 1;
   }
 
-  MiVmChunk* ch = mi_compile_vm_script_ex(&vm,
-      res.script,
-      x_slice_from_cstr("<script>"),
-      x_slice_from_cstr(mi_file));
-
+  MiVmChunk* ch = mi_compile_vm_script(&vm, res.script);
   x_arena_destroy(arena);
   if (!ch)
   {

@@ -20,10 +20,6 @@ typedef enum MiTokenKind
   MI_TOK_FUNC,
   MI_TOK_RETURN,
   MI_TOK_LET,
-  MI_TOK_IF,
-  MI_TOK_ELSE,
-  MI_TOK_WHILE,
-  MI_TOK_FOREACH,
   MI_TOK_INT,
   MI_TOK_FLOAT,
   MI_TOK_STRING,
@@ -42,7 +38,7 @@ typedef enum MiTokenKind
   MI_TOK_COMMA,       // ,
   MI_TOK_COLON,       // :
   MI_TOK_DOLLAR,      // $
-  MI_TOK_SEMICOLON,  // ';' statement terminator
+  MI_TOK_NEWLINE,     // ';' statement separator (legacy name)
   MI_TOK_PLUS,        // + 
   MI_TOK_MINUS,       // - 
   MI_TOK_STAR,        // * 
@@ -58,10 +54,6 @@ typedef enum MiTokenKind
   MI_TOK_ERROR        // internal error token
 } MiTokenKind;
 
-
-
-// Backwards compatibility (older code used MI_TOK_NEWLINE for ';')
-#define MI_TOK_NEWLINE MI_TOK_SEMICOLON
 typedef struct MiToken
 {
   MiTokenKind kind;

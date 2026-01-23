@@ -163,15 +163,8 @@ struct MiVmChunk
   MiVmChunk**    subchunks;      // block literal payloads
   size_t         subchunk_count;
   size_t         subchunk_capacity;
-
-
-// Debug source mapping (optional; may be NULL for chunks loaded without debug info)
-XSlice     dbg_name;        // e.g. function name, "<script>", "<block>"
-XSlice     dbg_file;        // e.g. filename or module name
-uint32_t*  dbg_lines;       // per-instruction line number (1-based); 0 if unknown
-uint32_t*  dbg_cols;        // per-instruction column (1-based); 0 if unknown
-size_t     dbg_capacity;    // capacity of dbg_* arrays (tracks code_capacity)
 };
+
 struct MiVm
 {
   MiRuntime* rt;

@@ -553,7 +553,6 @@ static MiRtValue s_vm_cmd_print(MiVm* vm, XSlice name, int argc, const MiRtValue
 
 static const char* s_op_name(MiVmOp op);
 
-
 static void s_vm_trace_print_frame(const MiVmChunk* chunk, size_t ip, const char* label)
 {
   if (!chunk)
@@ -562,38 +561,16 @@ static void s_vm_trace_print_frame(const MiVmChunk* chunk, size_t ip, const char
     return;
   }
 
-  const char* chunk_name = (chunk->dbg_name.ptr && chunk->dbg_name.length) ? (const char*)chunk->dbg_name.ptr : "<chunk>";
-  const char* file_name  = (chunk->dbg_file.ptr && chunk->dbg_file.length) ? (const char*)chunk->dbg_file.ptr : "<unknown>";
-
-  uint32_t line = 0;
-  uint32_t col  = 0;
-  if (chunk->dbg_lines && chunk->dbg_cols && ip < chunk->code_count)
-  {
-    line = chunk->dbg_lines[ip];
-    col  = chunk->dbg_cols[ip];
-  }
-
   if (ip >= chunk->code_count)
   {
-    printf("  %s %s %s:%u:%u ip=%zu <out-of-range>\n",
-      label ? label : "",
-      chunk_name,
-      file_name,
-      (unsigned)line,
-      (unsigned)col,
-      ip);
+    printf("  %s ip=%zu <out-of-range>\n", label ? label : "", ip);
     return;
   }
 
   const MiVmIns ins = chunk->code[ip];
   const char* opname = s_op_name((MiVmOp)ins.op);
-
-  printf("  %s %s %s:%u:%u ip=%zu %s a=%u b=%u c=%u imm=%d\n",
+  printf("  %s ip=%zu %s a=%u b=%u c=%u imm=%d\n",
     label ? label : "",
-    chunk_name,
-    file_name,
-    (unsigned)line,
-    (unsigned)col,
     ip,
     opname ? opname : "<?>",
     (unsigned)ins.a,
@@ -601,7 +578,6 @@ static void s_vm_trace_print_frame(const MiVmChunk* chunk, size_t ip, const char
     (unsigned)ins.c,
     (int)ins.imm);
 }
-
 
 static void s_vm_trace_print(MiVm* vm)
 {
@@ -1302,24 +1278,6 @@ static void s_vm_chunk_destroy_ex(MiVmChunk* chunk, MiVmChunk** stack, size_t de
     }
     free(chunk->cmd_names);
   }
-
-if (chunk->dbg_lines)
-{
-  free(chunk->dbg_lines);
-}
-if (chunk->dbg_cols)
-{
-  free(chunk->dbg_cols);
-}
-if (chunk->dbg_name.ptr)
-{
-  free((void*)chunk->dbg_name.ptr);
-}
-if (chunk->dbg_file.ptr)
-{
-  free((void*)chunk->dbg_file.ptr);
-}
-
   free(chunk);
 }
 
@@ -1330,7 +1288,6 @@ void mi_vm_chunk_destroy(MiVmChunk* chunk)
 
 // Execution
 //----------------------------------------------------------
-
 
 static MiRtValue s_vm_binary_numeric(MiVmOp op, const MiRtValue* a, const MiRtValue* b)
 {
@@ -1359,18 +1316,6 @@ static MiRtValue s_vm_binary_numeric(MiVmOp op, const MiRtValue* a, const MiRtVa
 
 static MiRtValue s_vm_binary_compare(MiVmOp op, const MiRtValue* a, const MiRtValue* b)
 {
-
-  if (a->kind == MI_RT_VAL_VOID || b->kind == MI_RT_VAL_VOID)
-  {
-    switch (op)
-    {
-      case MI_VM_OP_EQ:   return mi_rt_make_bool(true);
-      case MI_VM_OP_NEQ:  return mi_rt_make_bool(false);
-      default:            return mi_rt_make_void();
-    }
-  }
-      
-
   if ((a->kind == MI_RT_VAL_INT || a->kind == MI_RT_VAL_FLOAT) &&
       (b->kind == MI_RT_VAL_INT || b->kind == MI_RT_VAL_FLOAT))
   {

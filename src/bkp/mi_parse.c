@@ -220,7 +220,7 @@ static MiToken s_lexer_next(MiLexer* lx)
   // statement separator
   if (c == ';')
   {
-    return s_make_token(MI_TOK_SEMICOLON, start, 1, line, column);
+    return s_make_token(MI_TOK_NEWLINE, start, 1, line, column);
   }
 
   // punctuation
@@ -360,10 +360,6 @@ static MiToken s_lexer_next(MiLexer* lx)
     if (x_slice_eq_cstr(s, "func")) return s_make_token(MI_TOK_FUNC, start, len, line, column);
     if (x_slice_eq_cstr(s, "return")) return s_make_token(MI_TOK_RETURN, start, len, line, column);
     if (x_slice_eq_cstr(s, "let")) return s_make_token(MI_TOK_LET, start, len, line, column);
-if (x_slice_eq_cstr(s, "if")) return s_make_token(MI_TOK_IF, start, len, line, column);
-if (x_slice_eq_cstr(s, "else")) return s_make_token(MI_TOK_ELSE, start, len, line, column);
-if (x_slice_eq_cstr(s, "while")) return s_make_token(MI_TOK_WHILE, start, len, line, column);
-if (x_slice_eq_cstr(s, "foreach")) return s_make_token(MI_TOK_FOREACH, start, len, line, column);
     if (x_slice_eq_cstr(s, "true")) return s_make_token(MI_TOK_TRUE, start, len, line, column);
     if (x_slice_eq_cstr(s, "false")) return s_make_token(MI_TOK_FALSE, start, len, line, column);
     if (x_slice_eq_cstr(s, "void")) return s_make_token(MI_TOK_VOID, start, len, line, column);
@@ -554,12 +550,6 @@ static MiCommand* s_new_command(MiParser* p, MiExpr* head, int argc, MiExprList*
 //----------------------------------------------------------
 
 static MiExpr* s_parse_expr(MiParser* p);
-static MiCommand* s_parse_if_stmt(MiParser* p, MiToken if_tok);
-static MiCommand* s_parse_while_stmt(MiParser* p, MiToken while_tok);
-static MiCommand* s_parse_foreach_stmt(MiParser* p, MiToken foreach_tok);
-static MiCommand* s_parse_block_stmt(MiParser* p, MiExpr* block_expr);
-static MiExpr* s_parse_stmt_as_block_expr(MiParser* p);
-static MiCommand* s_parse_stmt_command(MiParser* p);
 static MiScript* s_parse_script(MiParser* p, bool stop_at_rbrace);
 
 static MiExpr* s_ident_as_string(MiParser* p, MiToken ident)
@@ -569,28 +559,6 @@ static MiExpr* s_ident_as_string(MiParser* p, MiToken ident)
   {
     return NULL;
   }
-  e->as.string_lit.value = e->token.lexeme;
-  return e;
-}
-
-
-static MiToken s_fake_token(const char* cstr)
-{
-  MiToken t;
-  memset(&t, 0, sizeof(t));
-  t.kind = MI_TOK_STRING;
-  t.lexeme.ptr = cstr;
-  t.lexeme.length = strlen(cstr);
-  t.line = 0;
-  t.column = 0;
-  return t;
-}
-
-static MiExpr* s_cstr_as_string(MiParser* p, const char* cstr)
-{
-  MiToken t = s_fake_token(cstr);
-  MiExpr* e = s_new_expr(p, MI_EXPR_STRING_LITERAL, t, true);
-  if (!e) return NULL;
   e->as.string_lit.value = e->token.lexeme;
   return e;
 }
@@ -662,141 +630,6 @@ static MiExpr* s_parse_primary(MiParser* p)
     return e;
   }
 
-  
-  // list/dict literal:
-  //   list: '[' [expr (',' expr)* [',']] ']'
-  //   dict: '[' [pair (',' pair)* [',']] ']'
-  //   empty dict: '[:]'  (disambiguates from empty list '[]')
-  //   pair separators: ':' or '='  (both accepted)
-  if (s_parser_match(p, MI_TOK_LBRACKET))
-  {
-    MiToken lt = s_parser_prev(p);
-
-    // Special empty dict marker: [:]
-    if (s_parser_match(p, MI_TOK_COLON))
-    {
-      if (!s_parser_expect(p, MI_TOK_RBRACKET, "Expected ']' after '[:'"))
-      {
-        return NULL;
-      }
-
-      MiExpr* e = s_new_expr(p, MI_EXPR_DICT, lt, false);
-      if (!e) return NULL;
-      e->as.dict.items = NULL;
-      return e;
-    }
-
-    // Empty list: []
-    if (s_parser_match(p, MI_TOK_RBRACKET))
-    {
-      MiExpr* e = s_new_expr(p, MI_EXPR_LIST, lt, false);
-      if (!e) return NULL;
-      e->as.list.items = NULL;
-      return e;
-    }
-
-    // Parse first expression, then decide list vs dict based on next token.
-    MiExpr* first = s_parse_expr(p);
-    if (!first) return NULL;
-
-    // Dict if the next token is ':' or '='.
-    if (p->current.kind == MI_TOK_COLON || p->current.kind == MI_TOK_EQ)
-    {
-      MiExprList* entries = NULL;
-
-      for (;;)
-      {
-        MiExpr* key = first;
-        MiToken sep = p->current;
-        if (!(s_parser_match(p, MI_TOK_COLON) || s_parser_match(p, MI_TOK_EQ)))
-        {
-          s_parser_set_error(p, "Expected ':' or '=' in dict entry", p->current);
-          return NULL;
-        }
-
-        MiExpr* value = s_parse_expr(p);
-        if (!value) return NULL;
-
-        MiExpr* pair = s_new_expr(p, MI_EXPR_PAIR, sep, false);
-        if (!pair) return NULL;
-        pair->as.pair.key = key;
-        pair->as.pair.value = value;
-
-        entries = s_expr_list_append(p, entries, pair);
-
-        if (s_parser_match(p, MI_TOK_COMMA))
-        {
-          // allow trailing comma
-          if (s_parser_match(p, MI_TOK_RBRACKET))
-          {
-            break;
-          }
-          first = s_parse_expr(p);
-          if (!first) return NULL;
-          continue;
-        }
-
-        if (!s_parser_expect(p, MI_TOK_RBRACKET, "Expected ']' to close dict literal"))
-        {
-          return NULL;
-        }
-        break;
-      }
-
-      MiExpr* e = s_new_expr(p, MI_EXPR_DICT, lt, false);
-      if (!e) return NULL;
-      e->as.dict.items = entries;
-      return e;
-    }
-
-    // Otherwise: list literal (we already parsed first).
-    {
-      MiExprList* items = NULL;
-      items = s_expr_list_append(p, items, first);
-
-      if (s_parser_match(p, MI_TOK_COMMA))
-      {
-        // allow trailing comma
-        if (!s_parser_match(p, MI_TOK_RBRACKET))
-        {
-          for (;;)
-          {
-            MiExpr* item = s_parse_expr(p);
-            if (!item) return NULL;
-            items = s_expr_list_append(p, items, item);
-
-            if (s_parser_match(p, MI_TOK_COMMA))
-            {
-              if (s_parser_match(p, MI_TOK_RBRACKET))
-              {
-                break;
-              }
-              continue;
-            }
-
-            if (!s_parser_expect(p, MI_TOK_RBRACKET, "Expected ']' to close list literal"))
-            {
-              return NULL;
-            }
-            break;
-          }
-        }
-      }
-      else
-      {
-        if (!s_parser_expect(p, MI_TOK_RBRACKET, "Expected ']' to close list literal"))
-        {
-          return NULL;
-        }
-      }
-
-      MiExpr* e = s_new_expr(p, MI_EXPR_LIST, lt, false);
-      if (!e) return NULL;
-      e->as.list.items = items;
-      return e;
-    }
-  }
-
   if (s_parser_match(p, MI_TOK_IDENTIFIER))
   {
     MiToken ident = s_parser_prev(p);
@@ -846,65 +679,43 @@ static MiExpr* s_parse_call(MiParser* p)
   // call: primary '(' args ')'
   for (;;)
   {
-    // function-style call: expr '(' args ')'
-    if (s_parser_match(p, MI_TOK_LPAREN))
+    if (!s_parser_match(p, MI_TOK_LPAREN))
     {
-      MiToken call_tok = s_parser_prev(p);
-      MiExprList* args = NULL;
-      unsigned int argc = 0;
+      break;
+    }
 
-      if (p->current.kind != MI_TOK_RPAREN)
+    MiToken call_tok = s_parser_prev(p);
+    MiExprList* args = NULL;
+    unsigned int argc = 0;
+
+    if (p->current.kind != MI_TOK_RPAREN)
+    {
+      for (;;)
       {
-        for (;;)
+        MiExpr* a = s_parse_expr(p);
+        if (!a) return NULL;
+        args = s_expr_list_append(p, args, a);
+        argc = argc + 1;
+
+        if (s_parser_match(p, MI_TOK_COMMA))
         {
-          MiExpr* a = s_parse_expr(p);
-          if (!a) return NULL;
-          args = s_expr_list_append(p, args, a);
-          argc = argc + 1;
-
-          if (!s_parser_match(p, MI_TOK_COMMA))
-          {
-            break;
-          }
+          continue;
         }
+        break;
       }
-
-      if (!s_parser_expect(p, MI_TOK_RPAREN, "Expected ')' after call arguments"))
-      {
-        return NULL;
-      }
-
-      MiExpr* call = s_new_expr(p, MI_EXPR_COMMAND, call_tok, false);
-      if (!call) return NULL;
-      call->as.command.head = expr;
-      call->as.command.args = args;
-      call->as.command.argc = argc;
-      expr = call;
-      continue;
     }
 
-    // indexing: expr '[' index ']'
-    if (s_parser_match(p, MI_TOK_LBRACKET))
+    if (!s_parser_expect(p, MI_TOK_RPAREN, "Expected ')' after arguments"))
     {
-      MiToken it = s_parser_prev(p);
-
-      MiExpr* index = s_parse_expr(p);
-      if (!index) return NULL;
-
-      if (!s_parser_expect(p, MI_TOK_RBRACKET, "Expected ']' after index expression"))
-      {
-        return NULL;
-      }
-
-      MiExpr* ix = s_new_expr(p, MI_EXPR_INDEX, it, false);
-      if (!ix) return NULL;
-      ix->as.index.target = expr;
-      ix->as.index.index = index;
-      expr = ix;
-      continue;
+      return NULL;
     }
 
-    break;
+    MiExpr* call = s_new_expr(p, MI_EXPR_COMMAND, call_tok, false);
+    if (!call) return NULL;
+    call->as.command.head = expr;
+    call->as.command.args = args;
+    call->as.command.argc = argc;
+    expr = call;
   }
 
   return expr;
@@ -1109,7 +920,7 @@ static MiCommand* s_parse_return_stmt(MiParser* p)
   MiExprList* args = NULL;
   int argc = 0;
 
-  if (p->current.kind != MI_TOK_SEMICOLON)
+  if (p->current.kind != MI_TOK_NEWLINE)
   {
     MiExpr* e = s_parse_expr(p);
     if (!e) return NULL;
@@ -1117,7 +928,7 @@ static MiCommand* s_parse_return_stmt(MiParser* p)
     argc = 1;
   }
 
-  if (!s_parser_expect(p, MI_TOK_SEMICOLON, "Expected ';' after return"))
+  if (!s_parser_expect(p, MI_TOK_NEWLINE, "Expected ';' after return"))
   {
     return NULL;
   }
@@ -1139,37 +950,16 @@ static MiCommand* s_parse_assignment_stmt(MiParser* p, MiExpr* lhs)
 {
   MiToken eq = s_parser_prev(p);
 
-  MiExpr* lvalue = NULL;
-
-  if (!lhs)
+  if (!lhs || lhs->kind != MI_EXPR_VAR || lhs->as.var.is_indirect)
   {
-    s_parser_set_error(p, "Assignment target is missing", eq);
-    return NULL;
-  }
-
-  if (lhs->kind == MI_EXPR_VAR && !lhs->as.var.is_indirect)
-  {
-    // bare name assignment: lower to set("name", rhs)
-    MiExpr* name = s_new_expr(p, MI_EXPR_STRING_LITERAL, lhs->token, true);
-    if (!name) return NULL;
-    name->as.string_lit.value = lhs->as.var.name;
-    lvalue = name;
-  }
-  else if (lhs->kind == MI_EXPR_INDEX)
-  {
-    // indexed assignment: lower to set(<index-expr>, rhs)
-    lvalue = lhs;
-  }
-  else
-  {
-    s_parser_set_error(p, "Invalid assignment target", eq);
+    s_parser_set_error(p, "Assignment target must be an identifier", eq);
     return NULL;
   }
 
   MiExpr* rhs = s_parse_expr(p);
   if (!rhs) return NULL;
 
-  if (!s_parser_expect(p, MI_TOK_SEMICOLON, "Expected ';' after assignment"))
+  if (!s_parser_expect(p, MI_TOK_NEWLINE, "Expected ';' after assignment"))
   {
     return NULL;
   }
@@ -1177,8 +967,12 @@ static MiCommand* s_parse_assignment_stmt(MiParser* p, MiExpr* lhs)
   MiExprList* args = NULL;
   int argc = 0;
 
-  // arg0: lvalue (string name or index expression)
-  args = s_expr_list_append(p, args, lvalue);
+  // arg0: variable name (string)
+  MiExpr* name = s_new_expr(p, MI_EXPR_STRING_LITERAL, lhs->token, true);
+  if (!name) return NULL;
+  name->as.string_lit.value = lhs->as.var.name;
+
+  args = s_expr_list_append(p, args, name);
   args = s_expr_list_append(p, args, rhs);
   argc = 2;
 
@@ -1195,255 +989,9 @@ static MiCommand* s_parse_assignment_stmt(MiParser* p, MiExpr* lhs)
   return s_new_command(p, head, argc, args, eq);
 }
 
-
-static MiCommand* s_parse_block_stmt(MiParser* p, MiExpr* block_expr)
-{
-  // A standalone { ... } block is a statement; lower it to a call of the block.
-  // This matches existing "call block" semantics in the VM/compiler.
-  MiExprList* args = NULL;
-  args = s_expr_list_append(p, args, block_expr);
-
-  MiExpr* head = s_cstr_as_string(p, "call");
-  if (!head) return NULL;
-
-  return s_new_command(p, head, 1, args, block_expr->token);
-}
-
-static MiExpr* s_parse_stmt_as_block_expr(MiParser* p)
-{
-  // If the next token starts a literal block, parse it directly as an expression.
-  if (s_parser_peek(p).kind == MI_TOK_LBRACE)
-  {
-    return s_parse_primary(p); // primary() handles { script }
-  }
-
-  // Otherwise parse exactly one statement command, and wrap it into a block.
-  MiCommand* one = s_parse_stmt_command(p);
-  if (!one) return NULL;
-
-  MiScript* scr = s_new_script(p);
-  if (!scr) return NULL;
-
-  MiCommandList* node = (MiCommandList*)x_arena_alloc(p->arena, sizeof(MiCommandList));
-  if (!node) return NULL;
-  node->command = one;
-  node->next = NULL;
-
-  scr->first = node;
-  scr->command_count = 1;
-
-    MiToken bt = one->head ? one->head->token : s_fake_token("{");
-  MiExpr* blk = s_new_expr(p, MI_EXPR_BLOCK, bt, false);
-  if (!blk) return NULL;
-  blk->as.block.script = scr;
-  return blk;
-}
-
-static MiCommand* s_parse_if_stmt(MiParser* p, MiToken if_tok)
-{
-  // Lowering target expected by compiler special-form:
-  // if :: <cond> <then_block> ("elseif" <cond> <block>)* ("else" <block>)?
-  if (!s_parser_expect(p, MI_TOK_LPAREN, "Expected '(' after 'if'")) return NULL;
-  MiExpr* cond = s_parse_expr(p);
-  if (!cond) return NULL;
-  if (!s_parser_expect(p, MI_TOK_RPAREN, "Expected ')' after if condition")) return NULL;
-
-  MiExpr* then_blk = s_parse_stmt_as_block_expr(p);
-  if (!then_blk) return NULL;
-
-  MiExprList* args = NULL;
-  int argc = 0;
-
-  args = s_expr_list_append(p, args, cond);     argc++;
-  args = s_expr_list_append(p, args, then_blk); argc++;
-
-  // Parse an else chain. "else if" is not sugar: it's else + statement, but
-  // the compiler wants it flattened as "elseif" legs.
-  while (s_parser_match(p, MI_TOK_ELSE))
-  {
-    if (s_parser_match(p, MI_TOK_IF))
-    {
-      MiToken elseif_tok = s_parser_prev(p); // token of "if" after else
-      // Parse the nested if leg and append as: "elseif", <cond>, <block>
-      if (!s_parser_expect(p, MI_TOK_LPAREN, "Expected '(' after 'if'")) return NULL;
-      MiExpr* c2 = s_parse_expr(p);
-      if (!c2) return NULL;
-      if (!s_parser_expect(p, MI_TOK_RPAREN, "Expected ')' after if condition")) return NULL;
-
-      MiExpr* b2 = s_parse_stmt_as_block_expr(p);
-      if (!b2) return NULL;
-
-      MiExpr* kw = s_cstr_as_string(p, "elseif");
-      if (!kw) return NULL;
-
-      args = s_expr_list_append(p, args, kw); argc++;
-      args = s_expr_list_append(p, args, c2); argc++;
-      args = s_expr_list_append(p, args, b2); argc++;
-
-      // Continue loop: if the nested leg has an else, it will appear next in the token stream.
-      // We do NOT consume it here; the while loop will.
-      (void)elseif_tok;
-      continue;
-    }
-
-    // else <stmt>
-    MiExpr* else_blk = s_parse_stmt_as_block_expr(p);
-    if (!else_blk) return NULL;
-
-    MiExpr* kw = s_cstr_as_string(p, "else");
-    if (!kw) return NULL;
-
-    args = s_expr_list_append(p, args, kw);       argc++;
-    args = s_expr_list_append(p, args, else_blk); argc++;
-    break; // else terminates the chain
-  }
-
-  MiExpr* head = s_cstr_as_string(p, "if");
-  if (!head) return NULL;
-
-  return s_new_command(p, head, argc, args, if_tok);
-}
-
-static MiCommand* s_parse_while_stmt(MiParser* p, MiToken while_tok)
-{
-  if (!s_parser_expect(p, MI_TOK_LPAREN, "Expected '(' after 'while'")) return NULL;
-  MiExpr* cond = s_parse_expr(p);
-  if (!cond) return NULL;
-  if (!s_parser_expect(p, MI_TOK_RPAREN, "Expected ')' after while condition")) return NULL;
-
-  MiExpr* body = s_parse_stmt_as_block_expr(p);
-  if (!body) return NULL;
-
-  MiExprList* args = NULL;
-  args = s_expr_list_append(p, args, cond);
-  args = s_expr_list_append(p, args, body);
-
-  MiExpr* head = s_cstr_as_string(p, "while");
-  if (!head) return NULL;
-
-  return s_new_command(p, head, 2, args, while_tok);
-}
-
-static MiCommand* s_parse_foreach_stmt(MiParser* p, MiToken foreach_tok)
-{
-  if (!s_parser_expect(p, MI_TOK_LPAREN, "Expected '(' after 'foreach'")) return NULL;
-
-  if (!s_parser_expect(p, MI_TOK_IDENTIFIER, "Expected loop variable name in foreach(...)"))
-  {
-    return NULL;
-  }
-  MiToken var_tok = s_parser_prev(p);
-
-  if (!s_parser_expect(p, MI_TOK_COMMA, "Expected ',' after foreach variable")) return NULL;
-
-  MiExpr* list_expr = s_parse_expr(p);
-  if (!list_expr) return NULL;
-
-  if (!s_parser_expect(p, MI_TOK_RPAREN, "Expected ')' after foreach header")) return NULL;
-
-  // foreach requires a literal body block (compiler expects a block expr)
-  if (!s_parser_expect(p, MI_TOK_LBRACE, "Expected '{' to start foreach body")) return NULL;
-  // parse_primary expects we've already consumed '{'? It matches on LBRACE.
-  // We'll reconstruct: step back isn't possible, so manually parse inner script here.
-  MiToken bt = s_parser_prev(p);
-  MiScript* inner = s_parse_script(p, true);
-  if (!inner) return NULL;
-  if (!s_parser_expect(p, MI_TOK_RBRACE, "Expected '}' after foreach body")) return NULL;
-
-  MiExpr* body = s_new_expr(p, MI_EXPR_BLOCK, bt, false);
-  if (!body) return NULL;
-  body->as.block.script = inner;
-
-  MiExpr* varname = s_ident_as_string(p, var_tok);
-  if (!varname) return NULL;
-
-  MiExprList* args = NULL;
-  args = s_expr_list_append(p, args, varname);
-  args = s_expr_list_append(p, args, list_expr);
-  args = s_expr_list_append(p, args, body);
-
-  MiExpr* head = s_cstr_as_string(p, "foreach");
-  if (!head) return NULL;
-
-  return s_new_command(p, head, 3, args, foreach_tok);
-}
-
-static MiCommand* s_parse_stmt_command(MiParser* p)
-{
-  MiToken tok = s_parser_peek(p);
-
-  if (tok.kind == MI_TOK_LBRACE)
-  {
-    MiExpr* blk = s_parse_primary(p);
-    if (!blk) return NULL;
-    return s_parse_block_stmt(p, blk);
-  }
-
-  if (s_parser_match(p, MI_TOK_IF))
-  {
-    return s_parse_if_stmt(p, s_parser_prev(p));
-  }
-
-  if (s_parser_match(p, MI_TOK_WHILE))
-  {
-    return s_parse_while_stmt(p, s_parser_prev(p));
-  }
-
-  if (s_parser_match(p, MI_TOK_FOREACH))
-  {
-    return s_parse_foreach_stmt(p, s_parser_prev(p));
-  }
-
-  if (s_parser_match(p, MI_TOK_FUNC))
-  {
-    return s_parse_func_decl(p);
-  }
-
-  if (s_parser_match(p, MI_TOK_RETURN))
-  {
-    return s_parse_return_stmt(p);
-  }
-
-  if (s_parser_match(p, MI_TOK_LET))
-  {
-    if (!s_parser_expect(p, MI_TOK_IDENTIFIER, "Expected identifier after 'let'"))
-    {
-      return NULL;
-    }
-    MiExpr* lhs = s_ident_as_var(p, s_parser_prev(p));
-    if (!lhs) return NULL;
-    if (!s_parser_expect(p, MI_TOK_EQ, "Expected '=' after identifier"))
-    {
-      return NULL;
-    }
-    return s_parse_assignment_stmt(p, lhs);
-  }
-
-  // expression statement or assignment
-  MiExpr* expr = s_parse_expr(p);
-  if (!expr) return NULL;
-
-  if (s_parser_match(p, MI_TOK_EQ))
-  {
-    return s_parse_assignment_stmt(p, expr);
-  }
-
-  if (!s_parser_expect(p, MI_TOK_SEMICOLON, "Expected ';' after statement"))
-  {
-    return NULL;
-  }
-
-  return s_stmt_to_command(p, expr);
-}
-
 static MiScript* s_parse_script(MiParser* p, bool stop_at_rbrace)
 {
   MiScript* scr = s_new_script(p);
-  if (!scr)
-  {
-    return NULL;
-  }
-
   MiCommandList* list = NULL;
   size_t count = 0;
 
@@ -1461,20 +1009,72 @@ static MiScript* s_parse_script(MiParser* p, bool stop_at_rbrace)
       break;
     }
 
-    // Allow stray semicolons as empty statements.
-    if (tok.kind == MI_TOK_SEMICOLON)
+    if (tok.kind == MI_TOK_NEWLINE)
     {
       (void)s_parser_advance(p);
       continue;
     }
 
-    // Parse exactly one statement and append.
-    MiCommand* cmd = s_parse_stmt_command(p);
-    if (!cmd)
+    // func decl
+    if (s_parser_match(p, MI_TOK_FUNC))
+    {
+      MiCommand* cmd = s_parse_func_decl(p);
+      if (!cmd) break;
+      list = s_command_list_append(p, list, cmd);
+      count = count + 1;
+      continue;
+    }
+
+    // return stmt
+    if (s_parser_match(p, MI_TOK_RETURN))
+    {
+      MiCommand* cmd = s_parse_return_stmt(p);
+      if (!cmd) break;
+      list = s_command_list_append(p, list, cmd);
+      count = count + 1;
+      continue;
+    }
+
+    // let (currently just a synonym for assignment)
+    if (s_parser_match(p, MI_TOK_LET))
+    {
+      if (!s_parser_expect(p, MI_TOK_IDENTIFIER, "Expected identifier after 'let'"))
+      {
+        break;
+      }
+      MiExpr* lhs = s_ident_as_var(p, s_parser_prev(p));
+      if (!lhs) break;
+      if (!s_parser_expect(p, MI_TOK_EQ, "Expected '=' after identifier"))
+      {
+        break;
+      }
+      MiCommand* cmd = s_parse_assignment_stmt(p, lhs);
+      if (!cmd) break;
+      list = s_command_list_append(p, list, cmd);
+      count = count + 1;
+      continue;
+    }
+
+    // expression statement or assignment
+    MiExpr* expr = s_parse_expr(p);
+    if (!expr) break;
+
+    if (s_parser_match(p, MI_TOK_EQ))
+    {
+      MiCommand* cmd = s_parse_assignment_stmt(p, expr);
+      if (!cmd) break;
+      list = s_command_list_append(p, list, cmd);
+      count = count + 1;
+      continue;
+    }
+
+    if (!s_parser_expect(p, MI_TOK_NEWLINE, "Expected ';' after statement"))
     {
       break;
     }
 
+    MiCommand* cmd = s_stmt_to_command(p, expr);
+    if (!cmd) break;
     list = s_command_list_append(p, list, cmd);
     count = count + 1;
   }

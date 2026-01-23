@@ -1,27 +1,24 @@
 #ifndef MI_COMPILE_H
 #define MI_COMPILE_H
 
-#include <stdbool.h>
-#include <stddef.h>
-
-#include <stdx_arena.h>
 #include <stdx_string.h>
 
-#include "mi_bytecode.h"
+#include "mi_vm.h"
 
-//----------------------------------------------------------
-// Compiler
-//----------------------------------------------------------
+typedef struct MiScript MiScript;
 
-typedef struct MiCompiler
-{
-  XArena*  arena;
-  size_t   program_arena_chunk_size;
-  uint8_t next_temp_reg;
-} MiCompiler;
+/**
+ * Compile an already-parsed AST script into VM bytecode (MiVmChunk).
+ * The compiler will deep-copy any strings/constants into chunk-owned memory.
+ * The returned chunk must be destroyed with mi_vm_chunk_destroy().
+ */
+MiVmChunk* mi_compile_vm_script(MiVm* vm, const MiScript* script);
 
-void mi_compiler_init(MiCompiler* c, size_t arena_chunk_size);
-void mi_compiler_shutdown(MiCompiler* c);
-bool mi_compile_script(MiCompiler* c, XSlice source, MiProgram* out_prog);
+/* Compile with debug name/file attached to the resulting chunk.
+   - dbg_name is shown in disassembly/trace (e.g. "<script>", "<block>").
+   - dbg_file should be the source filename (or module name).
+   Pass empty slices to omit.
+*/
+MiVmChunk* mi_compile_vm_script_ex(MiVm* vm, const MiScript* script, XSlice dbg_name, XSlice dbg_file);
 
-#endif
+#endif // MI_COMPILE_H

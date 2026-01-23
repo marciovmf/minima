@@ -1,4 +1,4 @@
-#include "mi_mix.h"
+#include "mi_mx.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,12 +10,12 @@
 // MIX - on-disk structs
 //----------------------------------------------------------
 
-#define MI_MIX_MAGIC_0 'M'
-#define MI_MIX_MAGIC_1 'I'
-#define MI_MIX_MAGIC_2 'X'
-#define MI_MIX_MAGIC_3 '1'
+#define MI_MX_MAGIC_0 '<'
+#define MI_MX_MAGIC_1 'M'
+#define MI_MX_MAGIC_2 'X'
+#define MI_MX_MAGIC_3 '>'
 
-#define MI_MIX_VERSION 1u
+#define MI_MX_VERSION 1u
 
 typedef struct MiMixHeader
 {
@@ -27,11 +27,11 @@ typedef struct MiMixHeader
 
 typedef enum MiMixConstKind
 {
-  MI_MIX_CONST_VOID  = 0,
-  MI_MIX_CONST_INT   = 1,
-  MI_MIX_CONST_FLOAT = 2,
-  MI_MIX_CONST_BOOL  = 3,
-  MI_MIX_CONST_STRING = 4,
+  MI_MX_CONST_VOID  = 0,
+  MI_MX_CONST_INT   = 1,
+  MI_MX_CONST_FLOAT = 2,
+  MI_MX_CONST_BOOL  = 3,
+  MI_MX_CONST_STRING = 4,
 } MiMixConstKind;
 
 //----------------------------------------------------------
@@ -325,22 +325,22 @@ static bool s_save_chunk(FILE* f, const MiVmChunk* c, const MiMixChunkMap* map)
     switch (v.kind)
     {
       case MI_RT_VAL_VOID:
-        if (!s_write_u8(f, MI_MIX_CONST_VOID)) return false;
+        if (!s_write_u8(f, MI_MX_CONST_VOID)) return false;
         break;
       case MI_RT_VAL_INT:
-        if (!s_write_u8(f, MI_MIX_CONST_INT)) return false;
+        if (!s_write_u8(f, MI_MX_CONST_INT)) return false;
         if (!s_write_u64(f, (uint64_t)v.as.i)) return false;
         break;
       case MI_RT_VAL_FLOAT:
-        if (!s_write_u8(f, MI_MIX_CONST_FLOAT)) return false;
+        if (!s_write_u8(f, MI_MX_CONST_FLOAT)) return false;
         if (!s_write_f64(f, v.as.f)) return false;
         break;
       case MI_RT_VAL_BOOL:
-        if (!s_write_u8(f, MI_MIX_CONST_BOOL)) return false;
+        if (!s_write_u8(f, MI_MX_CONST_BOOL)) return false;
         if (!s_write_u8(f, (uint8_t)(v.as.b ? 1 : 0))) return false;
         break;
       case MI_RT_VAL_STRING:
-        if (!s_write_u8(f, MI_MIX_CONST_STRING)) return false;
+        if (!s_write_u8(f, MI_MX_CONST_STRING)) return false;
         if (!s_write_slice(f, v.as.s)) return false;
         break;
       default:
@@ -412,7 +412,7 @@ static bool s_save_chunk(FILE* f, const MiVmChunk* c, const MiMixChunkMap* map)
   return true;
 }
 
-bool mi_mix_save_file(const MiVmChunk* entry, const char* filename)
+bool mi_mx_save_file(const MiVmChunk* entry, const char* filename)
 {
   if (!entry || !filename)
   {
@@ -437,11 +437,11 @@ bool mi_mix_save_file(const MiVmChunk* entry, const char* filename)
   }
 
   MiMixHeader h;
-  h.magic[0] = (uint8_t)MI_MIX_MAGIC_0;
-  h.magic[1] = (uint8_t)MI_MIX_MAGIC_1;
-  h.magic[2] = (uint8_t)MI_MIX_MAGIC_2;
-  h.magic[3] = (uint8_t)MI_MIX_MAGIC_3;
-  h.version = MI_MIX_VERSION;
+  h.magic[0] = (uint8_t)MI_MX_MAGIC_0;
+  h.magic[1] = (uint8_t)MI_MX_MAGIC_1;
+  h.magic[2] = (uint8_t)MI_MX_MAGIC_2;
+  h.magic[3] = (uint8_t)MI_MX_MAGIC_3;
+  h.version = MI_MX_VERSION;
   h.chunk_count = (uint32_t)list.count;
   h.entry_chunk_index = 0;
 
@@ -564,28 +564,28 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t chunk_count, uint32_t
     }
     switch (kind)
     {
-      case MI_MIX_CONST_VOID:
+      case MI_MX_CONST_VOID:
         out->consts[i] = mi_rt_make_void();
         break;
-      case MI_MIX_CONST_INT:
+      case MI_MX_CONST_INT:
       {
         uint64_t v = 0;
         if (!s_read_u64(f, &v)) return false;
         out->consts[i] = mi_rt_make_int((long long)v);
       } break;
-      case MI_MIX_CONST_FLOAT:
+      case MI_MX_CONST_FLOAT:
       {
         double v = 0;
         if (!s_read_f64(f, &v)) return false;
         out->consts[i] = mi_rt_make_float(v);
       } break;
-      case MI_MIX_CONST_BOOL:
+      case MI_MX_CONST_BOOL:
       {
         uint8_t b = 0;
         if (!s_read_u8(f, &b)) return false;
         out->consts[i] = mi_rt_make_bool(b != 0);
       } break;
-      case MI_MIX_CONST_STRING:
+      case MI_MX_CONST_STRING:
       {
         XSlice s;
         if (!s_read_slice(f, &s)) return false;
@@ -692,7 +692,7 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t chunk_count, uint32_t
   return true;
 }
 
-bool mi_mix_load_file(MiVm* vm, const char* filename, MiMixProgram* out_program)
+bool mi_mx_load_file(MiVm* vm, const char* filename, MiMixProgram* out_program)
 {
   if (!vm || !filename || !out_program)
   {
@@ -714,12 +714,12 @@ bool mi_mix_load_file(MiVm* vm, const char* filename, MiMixProgram* out_program)
     return false;
   }
 
-  if (h.magic[0] != MI_MIX_MAGIC_0 || h.magic[1] != MI_MIX_MAGIC_1 || h.magic[2] != MI_MIX_MAGIC_2 || h.magic[3] != MI_MIX_MAGIC_3)
+  if (h.magic[0] != MI_MX_MAGIC_0 || h.magic[1] != MI_MX_MAGIC_1 || h.magic[2] != MI_MX_MAGIC_2 || h.magic[3] != MI_MX_MAGIC_3)
   {
     fclose(f);
     return false;
   }
-  if (h.version != MI_MIX_VERSION)
+  if (h.version != MI_MX_VERSION)
   {
     fclose(f);
     return false;
@@ -820,7 +820,7 @@ bool mi_mix_load_file(MiVm* vm, const char* filename, MiMixProgram* out_program)
   return true;
 }
 
-void mi_mix_program_destroy(MiMixProgram* p)
+void mi_mx_program_destroy(MiMixProgram* p)
 {
   if (!p || !p->chunks)
   {
