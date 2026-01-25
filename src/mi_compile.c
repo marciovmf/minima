@@ -1,7 +1,9 @@
 #include "mi_compile.h"
 #include "mi_fold.h"
+#include "mi_runtime.h"
 
 #include "mi_log.h"
+#include "mi_typecheck.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -12,8 +14,8 @@
 //----------------------------------------------------------
 
 static bool      s_chunk_const_eq(MiRtValue a, MiRtValue b);
-static void      s_chunk_emit(MiVmChunk* c, MiVmOp op, uint8_t a, uint8_t b, uint8_t c0, int32_t imm);
 static void      s_chunk_emit_loc(MiVmChunk* c, uint32_t line, uint32_t col, MiVmOp op, uint8_t a, uint8_t b, uint8_t c0, int32_t imm);
+
 static MiVmChunk* s_chunk_create(void);
 static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XArena* arena, XSlice dbg_name, XSlice dbg_file);
 
@@ -94,11 +96,6 @@ static bool s_chunk_const_eq(MiRtValue a, MiRtValue b)
                           }
     default: return false;
   }
-}
-
-static void s_chunk_emit(MiVmChunk* c, MiVmOp op, uint8_t a, uint8_t b, uint8_t c0, int32_t imm)
-{
-  s_chunk_emit_loc(c, 0, 0, op, a, b, c0, imm);
 }
 
 static void s_chunk_dbg_grow(MiVmChunk* c, size_t new_cap)
@@ -239,6 +236,24 @@ static int32_t s_chunk_add_symbol(MiVmChunk* c, XSlice name)
   return idx;
 }
 
+static int32_t s_chunk_find_symbol(const MiVmChunk* c, XSlice name)
+{
+  if (!c)
+  {
+    return -1;
+  }
+
+  for (size_t i = 0; i < c->symbol_count; ++i)
+  {
+    if (s_slice_eq(c->symbols[i], name))
+    {
+      return (int32_t)i;
+    }
+  }
+
+  return -1;
+}
+
 /* Command lookup lives in the VM runtime. */
 
 static int32_t s_chunk_add_cmd_fn(MiVmChunk* c, XSlice name, MiVmCommandFn fn)
@@ -296,6 +311,12 @@ typedef struct MiVmBuild
   uint8_t     next_reg;
   uint8_t     reg_base;
 
+  /* Names of typed `func` declarations in the current script.
+     Used to compile `foo` as a first-class function value (currently a string name)
+     without requiring VM changes. */
+  XSlice*     func_names;
+  size_t      func_name_count;
+
   /* Current source location for emitted instructions (1-based; 0 = unknown). */
   uint32_t    dbg_line;
   uint32_t    dbg_col;
@@ -319,6 +340,24 @@ typedef struct MiVmBuild
   // another command call. Command expressions must preserve the arg stack.
   int         arg_expr_depth;
 } MiVmBuild;
+
+static bool s_build_is_func_name(const MiVmBuild* b, XSlice name)
+{
+  if (!b || !b->func_names)
+  {
+    return false;
+  }
+
+  for (size_t i = 0; i < b->func_name_count; ++i)
+  {
+    if (s_slice_eq(b->func_names[i], name))
+    {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 static inline void s_set_dbg(MiVmBuild* b, const MiToken* tok)
 {
@@ -1267,8 +1306,21 @@ must preserve the arg stack (ARG_SAVE/ARG_RESTORE). */
     {
       // Late-bound command: allow user-defined commands created earlier in the script.
       uint8_t head_reg = s_alloc_reg(b);
-      int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_string_slice(name));
-      s_emit(b, MI_VM_OP_LOAD_CONST, head_reg, 0, 0, k);
+      /* If there is a variable with this name in the current chunk,
+         treat the call as call-by-value (the variable must evaluate
+         to a command name string). This is required for patterns like:
+         foreach(n, list) { n(); }
+         where n is a loop variable holding "foo"/"bar". */
+      int32_t sym = s_chunk_find_symbol(b->chunk, name);
+      if (sym >= 0)
+      {
+        s_emit(b, MI_VM_OP_LOAD_VAR, head_reg, 0, 0, sym);
+      }
+      else
+      {
+        int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_string_slice(name));
+        s_emit(b, MI_VM_OP_LOAD_CONST, head_reg, 0, 0, k);
+      }
       s_emit(b, MI_VM_OP_CALL_CMD_DYN, dst, head_reg, argc, 0);
     }
 
@@ -1353,6 +1405,17 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
         {
           uint8_t name_reg = s_compile_expr(b, e->as.var.name_expr);
           s_emit(b, MI_VM_OP_LOAD_INDIRECT_VAR, r, name_reg, 0, 0);
+          return r;
+        }
+
+        /* If this identifier matches a typed `func` declared in this script,
+           treat it as a first-class function value. The current runtime
+           representation is the command name string, so that dynamic calls
+           work without VM changes. */
+        if (s_build_is_func_name(b, e->as.var.name))
+        {
+          int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_string_slice(e->as.var.name));
+          s_emit(b, MI_VM_OP_LOAD_CONST, r, 0, 0, k);
           return r;
         }
 
@@ -1490,6 +1553,22 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
     return NULL;
   }
 
+  {
+    MiTypecheckError tc;
+    if (!mi_typecheck_script(script, &tc))
+    {
+      if (tc.line > 0)
+      {
+        mi_error_fmt("Type error at %d:%d: %.*s\n", tc.line, tc.column, (int)tc.message.length, (const char*)tc.message.ptr);
+      }
+      else
+      {
+        mi_error_fmt("Type error: %.*s\n", (int)tc.message.length, (const char*)tc.message.ptr);
+      }
+      return NULL;
+    }
+  }
+
   /* Ensure the VM pipeline gets a folded AST. This is a pure simplification
      pass; it will not execute variables or commands. */
   mi_fold_constants_ast(NULL, script);
@@ -1506,6 +1585,25 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
   b.vm = vm;
   b.chunk = chunk;
   b.next_reg = 0;
+
+  /* Collect names of typed `func` declarations in this script.
+     These are lowered to cmd(...) for runtime, but we keep their names
+     so that `foo` can be used as a first-class value (currently a string
+     command name) in expression positions. */
+  {
+    const MiCommandList* fit = script ? script->first : NULL;
+    while (fit)
+    {
+      const MiCommand* fcmd = fit->command;
+      if (fcmd && fcmd->func_sig)
+      {
+        b.func_names = (XSlice*)s_realloc(b.func_names, (b.func_name_count + 1u) * sizeof(XSlice));
+        b.func_names[b.func_name_count] = fcmd->func_sig->name;
+        b.func_name_count += 1u;
+      }
+      fit = fit->next;
+    }
+  }
 
   const MiCommandList* it = script ? script->first : NULL;
   while (it)

@@ -24,6 +24,8 @@ list(APPEND SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/src/main.c
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_compile.c
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_compile.h
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_typecheck.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_typecheck.h
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_fold.c
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_fold.h
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_heap.c

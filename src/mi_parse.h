@@ -114,6 +114,58 @@ typedef enum MiExprKind
   MI_EXPR_COMMAND            // head_expr : arg_expr*  (when used in an expression)
 } MiExprKind;
 
+//----------------------------------------------------------
+// Types (front-end only)
+//----------------------------------------------------------
+
+typedef enum MiTypeKind
+{
+  MI_TYPE_VOID = 0,
+  MI_TYPE_BOOL,
+  MI_TYPE_INT,
+  MI_TYPE_FLOAT,
+  MI_TYPE_STRING,
+  MI_TYPE_LIST,
+  MI_TYPE_DICT,
+  MI_TYPE_BLOCK,
+  MI_TYPE_FUNC,
+  MI_TYPE_ANY
+} MiTypeKind;
+
+/* Optional function signature used in type annotations like func(int)->void. */
+typedef struct MiFuncTypeSig
+{
+  MiToken     func_tok;
+  MiToken     lparen_tok;
+  MiToken     rparen_tok;
+  MiToken     ret_tok;
+  MiTypeKind  ret_type;
+
+  MiTypeKind* param_types;
+  int         param_count;
+} MiFuncTypeSig;
+
+
+typedef struct MiFuncParam
+{
+  MiToken    name_tok;
+  XSlice     name;
+  MiToken    type_tok;
+  MiTypeKind type;
+  MiFuncTypeSig* func_sig;
+} MiFuncParam;
+
+typedef struct MiFuncSig
+{
+  MiToken    name_tok;
+  XSlice     name;
+  MiFuncParam* params;
+  int       param_count;
+  MiToken    ret_tok;
+  MiTypeKind ret_type;
+  MiFuncTypeSig* ret_func_sig;
+} MiFuncSig;
+
 typedef struct MiExpr
 {
   MiExprKind kind;
@@ -188,6 +240,10 @@ typedef struct MiCommand
   MiExpr    *head;
   MiExprList *args;
   int       argc;
+
+  /* Present only when this command originated from a typed `func` decl.
+     The compiler still lowers it to cmd(name, params..., block) for runtime. */
+  MiFuncSig *func_sig;
 } MiCommand;
 
 typedef struct MiScript

@@ -9,6 +9,7 @@
 // Lexer (C-ish)
 //----------------------------------------------------------
 
+
 typedef struct MiLexer
 {
   const char* src;
@@ -391,6 +392,9 @@ typedef struct MiParser
   XSlice   error_message;
 } MiParser;
 
+static MiTypeKind s_parse_type_name(MiParser* p, MiToken type_tok);
+static MiFuncTypeSig* s_parse_func_type_sig(MiParser* p, MiToken func_tok);
+static void s_parse_type_spec(MiParser* p, MiTypeKind* out_kind, MiFuncTypeSig** out_func_sig);
 static void s_parser_set_error(MiParser* p, const char* msg, MiToken at)
 {
   if (p->had_error)
@@ -1031,6 +1035,20 @@ static MiCommand* s_parse_func_decl(MiParser* p)
     return NULL;
   }
 
+  // Allocate and fill a signature for typechecking.
+  MiFuncSig* sig = (MiFuncSig*)x_arena_alloc_zero(p->arena, sizeof(MiFuncSig));
+  if (!sig)
+  {
+    s_parser_set_error(p, "Out of memory", p->current);
+    return NULL;
+  }
+  sig->name_tok = name_tok;
+  sig->name = name_tok.lexeme;
+  sig->params = NULL;
+  sig->param_count = 0;
+  sig->ret_tok = func_tok;
+  sig->ret_type = MI_TYPE_VOID;
+
   MiExprList* args = NULL;
   int argc = 0;
 
@@ -1050,6 +1068,45 @@ static MiCommand* s_parse_func_decl(MiParser* p)
         return NULL;
       }
       MiToken pt = s_parser_prev(p);
+
+      // Optional :type
+      MiTypeKind param_type = MI_TYPE_ANY;
+MiFuncTypeSig* param_func_sig = NULL;
+MiToken type_tok = pt;
+if (s_parser_match(p, MI_TOK_COLON))
+{
+  type_tok = s_parser_peek(p);
+  s_parse_type_spec(p, &param_type, &param_func_sig);
+  if (p->had_error)
+  {
+    return NULL;
+  }
+}
+if (p->had_error)
+        {
+          return NULL;
+        }
+      }
+
+      // Record parameter in signature.
+      MiFuncParam* params_new = (MiFuncParam*)x_arena_alloc_zero(p->arena, sizeof(MiFuncParam) * (size_t)(sig->param_count + 1));
+      if (!params_new)
+      {
+        s_parser_set_error(p, "Out of memory", p->current);
+        return NULL;
+      }
+      for (int i = 0; i < sig->param_count; i++)
+      {
+        params_new[i] = sig->params[i];
+      }
+      params_new[sig->param_count].name_tok = pt;
+      params_new[sig->param_count].name = pt.lexeme;
+      params_new[sig->param_count].type_tok = type_tok;
+      params_new[sig->param_count].type = param_type;
+      params_new[sig->param_count].func_sig = param_func_sig;
+      sig->params = params_new;
+      sig->param_count = sig->param_count + 1;
+
       MiExpr* pe = s_new_expr(p, MI_EXPR_STRING_LITERAL, pt, true);
       if (!pe) return NULL;
       pe->as.string_lit.value = pe->token.lexeme;
@@ -1067,6 +1124,28 @@ static MiCommand* s_parse_func_decl(MiParser* p)
   if (!s_parser_expect(p, MI_TOK_RPAREN, "Expected ')' after parameters"))
   {
     return NULL;
+  }
+
+  // Optional return type: -> Type
+  if (s_parser_match(p, MI_TOK_MINUS))
+  {
+    if (!s_parser_expect(p, MI_TOK_GT, "Expected '>' after '-' in return type"))
+    {
+      return NULL;
+    }
+
+    if (!(p->current.kind == MI_TOK_IDENTIFIER || p->current.kind == MI_TOK_VOID))
+    {
+      s_parser_set_error(p, "Expected return type name after '->'", p->current);
+      return NULL;
+    }
+    MiToken rt = s_parser_advance(p);
+    sig->ret_tok = rt;
+    sig->ret_type = s_parse_type_name(p, rt);
+    if (p->had_error)
+    {
+      return NULL;
+    }
   }
 
   // body block
@@ -1100,7 +1179,141 @@ static MiCommand* s_parse_func_decl(MiParser* p)
   if (!head) return NULL;
   head->as.string_lit.value = head->token.lexeme;
 
-  return s_new_command(p, head, argc, args, func_tok);
+  MiCommand* out = s_new_command(p, head, argc, args, func_tok);
+  if (!out) return NULL;
+  out->func_sig = sig;
+  return out;
+}
+
+static MiTypeKind s_parse_type_name(MiParser* p, MiToken type_tok)
+{
+  XSlice s = type_tok.lexeme;
+
+  // Accept keyword void.
+  if (type_tok.kind == MI_TOK_VOID || (s.length == 4 && memcmp(s.ptr, "void", 4) == 0))
+  {
+    return MI_TYPE_VOID;
+  }
+
+
+  // Accept keyword func.
+  if (type_tok.kind == MI_TOK_FUNC || (s.length == 4 && memcmp(s.ptr, "func", 4) == 0))
+  {
+    return MI_TYPE_FUNC;
+  }
+
+  // Builtin names are plain identifiers.
+  if (s.length == 3 && memcmp(s.ptr, "int", 3) == 0) return MI_TYPE_INT;
+  if (s.length == 5 && memcmp(s.ptr, "float", 5) == 0) return MI_TYPE_FLOAT;
+  if (s.length == 4 && memcmp(s.ptr, "bool", 4) == 0) return MI_TYPE_BOOL;
+  if (s.length == 6 && memcmp(s.ptr, "string", 6) == 0) return MI_TYPE_STRING;
+  if (s.length == 4 && memcmp(s.ptr, "list", 4) == 0) return MI_TYPE_LIST;
+  if (s.length == 4 && memcmp(s.ptr, "dict", 4) == 0) return MI_TYPE_DICT;
+  if (s.length == 5 && memcmp(s.ptr, "block", 5) == 0) return MI_TYPE_BLOCK;
+  if (s.length == 3 && memcmp(s.ptr, "any", 3) == 0) return MI_TYPE_ANY;
+
+  s_parser_set_error(p, "Unknown type name", type_tok);
+  return MI_TYPE_ANY;
+}
+
+static MiFuncTypeSig* s_parse_func_type_sig(MiParser* p, MiToken func_tok)
+{
+  /* func with signature must have '(' */
+  if (p->current.kind != MI_TOK_LPAREN)
+  {
+    return NULL;
+  }
+
+  MiFuncTypeSig* sig = (MiFuncTypeSig*)x_arena_alloc_zero(p->arena, sizeof(MiFuncTypeSig));
+  if (!sig)
+  {
+    s_parser_set_error(p, "Out of memory", func_tok);
+    return NULL;
+  }
+
+  sig->func_tok = func_tok;
+  sig->lparen_tok = s_parser_advance(p); /* consume '(' */
+
+  /* Parse param types (can be empty). */
+  MiTypeKind* tmp = NULL;
+  int tmp_count = 0;
+
+  if (p->current.kind != MI_TOK_RPAREN)
+  {
+    while (true)
+    {
+      if (!(p->current.kind == MI_TOK_IDENTIFIER || p->current.kind == MI_TOK_VOID || p->current.kind == MI_TOK_FUNC))
+      {
+        s_parser_set_error(p, "Expected type name in func signature", p->current);
+        return sig;
+      }
+
+      MiTypeKind t = s_parse_type_name(p, s_parser_advance(p));
+
+      MiTypeKind* grown = (MiTypeKind*)x_arena_alloc(p->arena, sizeof(MiTypeKind) * (size_t)(tmp_count + 1));
+      if (!grown)
+      {
+        s_parser_set_error(p, "Out of memory", func_tok);
+        return sig;
+      }
+      if (tmp_count > 0 && tmp)
+      {
+        memcpy(grown, tmp, sizeof(MiTypeKind) * (size_t)tmp_count);
+      }
+      grown[tmp_count] = t;
+      tmp = grown;
+      tmp_count++;
+
+      if (!s_parser_match(p, MI_TOK_COMMA))
+      {
+        break;
+      }
+    }
+  }
+
+  sig->rparen_tok = s_parser_expect(p, MI_TOK_RPAREN, "Expected ')' after func signature parameter list");
+
+  sig->param_types = tmp;
+  sig->param_count = tmp_count;
+
+  /* Optional -> return type, default void. */
+  sig->ret_type = MI_TYPE_VOID;
+  sig->ret_tok = sig->rparen_tok;
+  if (s_parser_match(p, MI_TOK_MINUS) && s_parser_match(p, MI_TOK_GT))
+  {
+    if (!(p->current.kind == MI_TOK_IDENTIFIER || p->current.kind == MI_TOK_VOID || p->current.kind == MI_TOK_FUNC))
+    {
+      s_parser_set_error(p, "Expected return type after '->' in func type", p->current);
+      return sig;
+    }
+    sig->ret_tok = s_parser_advance(p);
+    sig->ret_type = s_parse_type_name(p, sig->ret_tok);
+  }
+
+  return sig;
+}
+
+static void s_parse_type_spec(MiParser* p, MiTypeKind* out_kind, MiFuncTypeSig** out_func_sig)
+{
+  *out_kind = MI_TYPE_ANY;
+  *out_func_sig = NULL;
+
+  if (p->current.kind == MI_TOK_FUNC)
+  {
+    MiToken func_tok = s_parser_advance(p);
+    *out_kind = MI_TYPE_FUNC;
+    *out_func_sig = s_parse_func_type_sig(p, func_tok);
+    return;
+  }
+
+  if (p->current.kind == MI_TOK_VOID || p->current.kind == MI_TOK_IDENTIFIER)
+  {
+    MiToken t = s_parser_advance(p);
+    *out_kind = s_parse_type_name(p, t);
+    return;
+  }
+
+  s_parser_set_error(p, "Expected type name", p->current);
 }
 
 static MiCommand* s_parse_return_stmt(MiParser* p)
