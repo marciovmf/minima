@@ -17,6 +17,8 @@ typedef enum MiTokenKind
 {
   MI_TOK_EOF = 0,
   MI_TOK_IDENTIFIER,
+  MI_TOK_INCLUDE,
+  MI_TOK_IMPORT,
   MI_TOK_FUNC,
   MI_TOK_RETURN,
   MI_TOK_LET,
@@ -111,6 +113,7 @@ typedef enum MiExprKind
   MI_EXPR_DICT,             // [k = v, ...]  (pairs are only valid inside dict literals)
   MI_EXPR_PAIR,             // k = v (only produced inside dict literals)
   MI_EXPR_BLOCK,            // { script }
+  MI_EXPR_QUAL,             // target::member
   MI_EXPR_COMMAND            // head_expr : arg_expr*  (when used in an expression)
 } MiExprKind;
 
@@ -143,6 +146,8 @@ typedef struct MiFuncTypeSig
 
   MiTypeKind* param_types;
   int         param_count;
+  bool        is_variadic;
+  MiTypeKind   variadic_type;
 } MiFuncTypeSig;
 
 
@@ -228,6 +233,13 @@ typedef struct MiExpr
 
     struct
     {
+      struct MiExpr *target;
+      XSlice         member;
+      MiToken        member_tok;
+    } qual;
+
+    struct
+    {
       struct MiExpr *head;
       MiExprList    *args;
       unsigned int  argc;
@@ -244,6 +256,16 @@ typedef struct MiCommand
   /* Present only when this command originated from a typed `func` decl.
      The compiler still lowers it to cmd(name, params..., block) for runtime. */
   MiFuncSig *func_sig;
+
+  /* include/import statement sugar:
+     include "path" as name;
+     import  "path" as name;
+     The parser sets these fields and the compiler lowers it to:
+       r0 = include(path)
+       name = r0
+     So 'as name' is not passed as runtime arguments. */
+  bool      is_include_stmt;
+  MiToken   include_alias_tok;
 } MiCommand;
 
 typedef struct MiScript
@@ -264,6 +286,8 @@ typedef struct MiParseResult
   int       error_column;
   XSlice    error_message;
 } MiParseResult;
+
+void mi_parse_print_error(XSlice source, const MiParseResult* res);
 
 /**
  * Parse a full Minima script (top-level or block).

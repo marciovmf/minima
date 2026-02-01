@@ -359,6 +359,8 @@ static MiToken s_lexer_next(MiLexer* lx)
     XSlice s = x_slice_init(start, len);
 
     if (x_slice_eq_cstr(s, "func")) return s_make_token(MI_TOK_FUNC, start, len, line, column);
+    if (x_slice_eq_cstr(s, "include")) return s_make_token(MI_TOK_INCLUDE, start, len, line, column);
+    if (x_slice_eq_cstr(s, "import")) return s_make_token(MI_TOK_IMPORT, start, len, line, column);
     if (x_slice_eq_cstr(s, "return")) return s_make_token(MI_TOK_RETURN, start, len, line, column);
     if (x_slice_eq_cstr(s, "let")) return s_make_token(MI_TOK_LET, start, len, line, column);
 if (x_slice_eq_cstr(s, "if")) return s_make_token(MI_TOK_IF, start, len, line, column);
@@ -850,6 +852,25 @@ static MiExpr* s_parse_call(MiParser* p)
   // call: primary '(' args ')'
   for (;;)
   {
+    // qualified access: expr '::' IDENT
+    if (s_parser_match(p, MI_TOK_DOUBLE_COLON))
+    {
+      MiToken dc = s_parser_prev(p);
+      if (!s_parser_expect(p, MI_TOK_IDENTIFIER, "Expected identifier after '::'"))
+      {
+        return NULL;
+      }
+      MiToken mem = s_parser_prev(p);
+
+      MiExpr* q = s_new_expr(p, MI_EXPR_QUAL, dc, false);
+      if (!q) return NULL;
+      q->as.qual.target = expr;
+      q->as.qual.member = mem.lexeme;
+      q->as.qual.member_tok = mem;
+      expr = q;
+      continue;
+    }
+
     // function-style call: expr '(' args ')'
     if (s_parser_match(p, MI_TOK_LPAREN))
     {
@@ -1082,11 +1103,6 @@ if (s_parser_match(p, MI_TOK_COLON))
     return NULL;
   }
 }
-if (p->had_error)
-        {
-          return NULL;
-        }
-      }
 
       // Record parameter in signature.
       MiFuncParam* params_new = (MiFuncParam*)x_arena_alloc_zero(p->arena, sizeof(MiFuncParam) * (size_t)(sig->param_count + 1));
@@ -1271,10 +1287,16 @@ static MiFuncTypeSig* s_parse_func_type_sig(MiParser* p, MiToken func_tok)
     }
   }
 
-  sig->rparen_tok = s_parser_expect(p, MI_TOK_RPAREN, "Expected ')' after func signature parameter list");
+  MiToken rparen = s_parser_peek(p);
+  if(!s_parser_expect(p, MI_TOK_RPAREN, "Expected ')' after func signature parameter list"))
+    return NULL;
+  sig->rparen_tok = rparen;
 
   sig->param_types = tmp;
   sig->param_count = tmp_count;
+
+  sig->is_variadic = false;
+  sig->variadic_type = MI_TYPE_ANY;
 
   /* Optional -> return type, default void. */
   sig->ret_type = MI_TYPE_VOID;
@@ -1373,6 +1395,12 @@ static MiCommand* s_parse_assignment_stmt(MiParser* p, MiExpr* lhs)
     // indexed assignment: lower to set(<index-expr>, rhs)
     lvalue = lhs;
   }
+  else if (lhs->kind == MI_EXPR_QUAL)
+  {
+    // qualified assignment: lower to set(<qual-expr>, rhs)
+    // compiler will lower this to a fast member store.
+    lvalue = lhs;
+  }
   else
   {
     s_parser_set_error(p, "Invalid assignment target", eq);
@@ -1445,7 +1473,7 @@ static MiExpr* s_parse_stmt_as_block_expr(MiParser* p)
   scr->first = node;
   scr->command_count = 1;
 
-    MiToken bt = one->head ? one->head->token : s_fake_token("{");
+  MiToken bt = one->head ? one->head->token : s_fake_token("{");
   MiExpr* blk = s_new_expr(p, MI_EXPR_BLOCK, bt, false);
   if (!blk) return NULL;
   blk->as.block.script = scr;
@@ -1477,7 +1505,7 @@ static MiCommand* s_parse_if_stmt(MiParser* p, MiToken if_tok)
     if (s_parser_match(p, MI_TOK_IF))
     {
       MiToken elseif_tok = s_parser_prev(p); // token of "if" after else
-      // Parse the nested if leg and append as: "elseif", <cond>, <block>
+                                             // Parse the nested if leg and append as: "elseif", <cond>, <block>
       if (!s_parser_expect(p, MI_TOK_LPAREN, "Expected '(' after 'if'")) return NULL;
       MiExpr* c2 = s_parse_expr(p);
       if (!c2) return NULL;
@@ -1581,6 +1609,59 @@ static MiCommand* s_parse_foreach_stmt(MiParser* p, MiToken foreach_tok)
   return s_new_command(p, head, 3, args, foreach_tok);
 }
 
+static MiCommand* s_parse_include_stmt(MiParser* p, MiToken kw_tok, const char* head_name)
+{
+  // include "path/to/file" as alias;
+  // import  "path/to/file" as alias;
+
+  if (!s_parser_expect(p, MI_TOK_STRING, "Expected string literal after include/import"))
+  {
+    return NULL;
+  }
+  MiToken path_tok = s_parser_prev(p);
+
+  if (!s_parser_expect(p, MI_TOK_IDENTIFIER, "Expected 'as' after include/import path"))
+  {
+    return NULL;
+  }
+  MiToken as_tok = s_parser_prev(p);
+  if (!x_slice_eq_cstr(as_tok.lexeme, "as"))
+  {
+    s_parser_set_error(p, "Expected 'as' after include/import path", as_tok);
+    return NULL;
+  }
+
+  if (!s_parser_expect(p, MI_TOK_IDENTIFIER, "Expected alias identifier after 'as'"))
+  {
+    return NULL;
+  }
+  MiToken alias_tok = s_parser_prev(p);
+
+  if (!s_parser_expect(p, MI_TOK_SEMICOLON, "Expected ';' after include/import"))
+  {
+    return NULL;
+  }
+
+  /* Represent this as a normal command call (include/import with one argument)
+     plus an alias token carried on the MiCommand node. The compiler will
+     lower it to: alias = include(path). */
+  MiExpr* head = s_cstr_as_string(p, head_name);
+  if (!head) return NULL;
+
+  MiExpr* path = s_new_expr(p, MI_EXPR_STRING_LITERAL, path_tok, true);
+  if (!path) return NULL;
+  path->as.string_lit.value = path_tok.lexeme;
+
+  MiExprList* args = NULL;
+  args = s_expr_list_append(p, args, path);
+
+  MiCommand* cmd = s_new_command(p, head, 1, args, kw_tok);
+  if (!cmd) return NULL;
+  cmd->is_include_stmt = true;
+  cmd->include_alias_tok = alias_tok;
+  return cmd;
+}
+
 static MiCommand* s_parse_stmt_command(MiParser* p)
 {
   MiToken tok = s_parser_peek(p);
@@ -1630,6 +1711,16 @@ static MiCommand* s_parse_stmt_command(MiParser* p)
       return NULL;
     }
     return s_parse_assignment_stmt(p, lhs);
+  }
+
+  if (s_parser_match(p, MI_TOK_INCLUDE))
+  {
+    return s_parse_include_stmt(p, s_parser_prev(p), "include");
+  }
+
+  if (s_parser_match(p, MI_TOK_IMPORT))
+  {
+    return s_parse_include_stmt(p, s_parser_prev(p), "import");
   }
 
   // expression statement or assignment
@@ -1747,3 +1838,81 @@ MiParseResult mi_parse_program_ex(const char* source, size_t length, XArena* are
   out.script = script;
   return out;
 }
+
+
+
+static void s_mi_print_source_line(XSlice source, int line, int column)
+{
+  if (!source.ptr || source.length == 0 || line <= 0)
+  {
+    return;
+  }
+
+  int cur_line = 1;
+  size_t i = 0;
+  size_t line_start = 0;
+  size_t line_end = source.length;
+
+  while (i < source.length)
+  {
+    if (cur_line == line)
+    {
+      line_start = i;
+      break;
+    }
+    if (source.ptr[i] == '\n')
+    {
+      cur_line += 1;
+    }
+    i += 1;
+  }
+
+  i = line_start;
+  while (i < source.length)
+  {
+    if (source.ptr[i] == '\n')
+    {
+      line_end = i;
+      break;
+    }
+    i += 1;
+  }
+
+  if (line_start >= source.length || line_end <= line_start)
+  {
+    return;
+  }
+
+  XSlice ln = x_slice_init(source.ptr + line_start, line_end - line_start);
+  mi_error_fmt("  %.*s\n", (int)ln.length, ln.ptr);
+
+  int caret_col = column;
+  if (caret_col <= 0)
+  {
+    caret_col = 1;
+  }
+
+  mi_error("  ");
+  for (int c = 1; c < caret_col; c += 1)
+  {
+    mi_error(" ");
+  }
+  mi_error("^\n");
+}
+
+void mi_parse_print_error(XSlice source, const MiParseResult* res)
+{
+  if (!res || res->ok)
+  {
+    return;
+  }
+
+  mi_error_fmt("Parse error %d,%d - %.*s\n",
+      res->error_line,
+      res->error_column,
+      (int)res->error_message.length,
+      res->error_message.ptr);
+
+  s_mi_print_source_line(source, res->error_line, res->error_column);
+}
+

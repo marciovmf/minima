@@ -8,6 +8,7 @@
 #include <stdx_common.h>
 #include <stdx_string.h>
 #include <stdx_arena.h>
+#include <stdx_filesystem.h>
 
 #include "mi_parse.h"
 #include "mi_runtime.h"
@@ -52,6 +53,12 @@ typedef struct MiVmCommandEntry
   XSlice         name;
   MiVmCommandFn  fn;
 } MiVmCommandEntry;
+
+typedef struct MiVmModuleCacheEntry
+{
+  char*     key;   /* resolved mx path (heap string) */
+  MiRtValue value; /* module handle (block capturing env) */
+} MiVmModuleCacheEntry;
 
 typedef struct MiVmUserCommand
 {
@@ -106,6 +113,13 @@ typedef enum MiVmOp
   MI_VM_OP_OR,
   // Vars
   MI_VM_OP_LOAD_VAR,          // a = $sym[imm]
+  /* Qualified member load: a = regs[b].env[$sym[imm]]
+     regs[b] must be a VM chunk/module block (MI_RT_VAL_BLOCK with env). */
+  MI_VM_OP_LOAD_MEMBER,
+  /* Qualified member store: regs[b].env[$sym[imm]] = regs[a]
+     regs[b] must be a VM chunk/module block (MI_RT_VAL_BLOCK with env).
+     Assignment uses the same "search up then create" semantics as set:. */
+  MI_VM_OP_STORE_MEMBER,
   MI_VM_OP_STORE_VAR,         // $sym[imm] = a
   MI_VM_OP_DEFINE_VAR,        // define $sym[imm] = a in current scope only
   MI_VM_OP_LOAD_INDIRECT_VAR, // a = $( regs[b] )
@@ -130,6 +144,11 @@ typedef enum MiVmOp
   MI_VM_OP_JUMP_IF_FALSE,
   MI_VM_OP_RETURN,
   MI_VM_OP_HALT,
+
+  /* Fast command call: directly invoke chunk->cmd_fns[imm].
+     No qualified-name resolution, and no scoped shadowing lookup.
+     Compiler should emit this only for known, unqualified command heads. */
+  MI_VM_OP_CALL_CMD_FAST,
 } MiVmOp;
 
 typedef struct MiVmIns
@@ -152,6 +171,7 @@ struct MiVmChunk
   size_t     const_capacity;
 
   XSlice*    symbols;         // variable names
+  uint32_t*  symbol_ids;      // runtime-global symbol ids (lazy-interned; UINT32_MAX = unresolved)
   size_t     symbol_count;
   size_t     symbol_capacity;
 
@@ -176,6 +196,12 @@ struct MiVm
 {
   MiRuntime* rt;
 
+  /* Module cache directory for include:.
+     If cache_dir_set is false, include: selects a platform default.
+  */
+  XFSPath cache_dir;
+  bool    cache_dir_set;
+
   MiVmCommandEntry* commands;
   size_t            command_count;
   size_t            command_capacity;
@@ -184,6 +210,11 @@ struct MiVm
   struct MiMixProgram* modules;
   size_t               module_count;
   size_t               module_capacity;
+
+  /* Module instance cache (key = resolved mx path). */
+  MiVmModuleCacheEntry* module_cache;
+  size_t                module_cache_count;
+  size_t                module_cache_capacity;
 
   MiScopeFrame**       module_envs;
   size_t               module_env_count;
@@ -213,13 +244,16 @@ struct MiVm
 void      mi_vm_init(MiVm* vm, MiRuntime* rt);
 void      mi_vm_shutdown(MiVm* vm);
 
+/* Configure where include: should store compiled .mx cache entries.
+   If path is NULL or empty, include: uses a platform default. */
+void      mi_vm_set_cache_dir(MiVm* vm, const char* path);
+
 bool      mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn);
 
 /* Find a registered command by name. Returns NULL if not found. */
 MiVmCommandFn mi_vm_find_command_fn(MiVm* vm, XSlice name);
 
 /* Register a VM command (this is separate from mi_rt_register_command). */
-bool      mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn);
 
 /* Compile a script to bytecode chunk using the provided arena for allocations. */
 /* Destroy a compiled chunk (frees heap allocations). */

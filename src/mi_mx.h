@@ -9,6 +9,10 @@
 // MIX - MInima eXecutable
 //----------------------------------------------------------
 
+/* On-disk MX format version.
+   Bump this whenever the bytecode / serialization layout changes. */
+#define MI_MX_VERSION 3u
+
 typedef struct MiMixProgram
 {
   MiVmChunk* entry;
@@ -21,6 +25,10 @@ typedef struct MiMixProgram
 /* Save a compiled VM chunk to disk as a MX file.
    Returns false on I/O error or unsupported constant type. */
 bool mi_mx_save_file(const MiVmChunk* entry, const char* filename);
+
+/* Read MX header and return its version.
+   Returns false if the file is not a valid MX file or can't be read. */
+bool mi_mx_peek_file_version(const char* filename, uint32_t* out_version);
 
 /* Load a MIX program from disk.
    - Resolves command functions using vm->commands by name.

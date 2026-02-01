@@ -24,6 +24,9 @@ typedef struct MiRtBlock MiRtBlock;
 typedef struct MiRtCmd MiRtCmd;
 typedef struct MiScopeFrame MiScopeFrame;
 
+/* Forward decl to avoid circular include with mi_vm.h. */
+struct MiVm;
+
 typedef struct MiRtKvRef
 {
   MiRtDict* dict;
@@ -65,11 +68,20 @@ struct MiRtValue
   } as;
 };
 
+/* Native (C) command signature used by first-class command values. */
+typedef MiRtValue (*MiRtNativeFn)(struct MiVm* vm, XSlice cmd_name, int argc, const MiRtValue* argv);
+
 struct MiRtCmd
 {
-  uint32_t  param_count;
-  XSlice*   param_names; /* heap buffer owned by cmd */
-  MiRtValue body;        /* MI_RT_VAL_BLOCK (retained) */
+  bool       is_native;
+  uint32_t   param_count;
+  XSlice*    param_names; /* heap buffer owned by cmd */
+
+  /* If is_native == false, body is MI_RT_VAL_BLOCK (retained). */
+  MiRtValue  body;
+
+  /* If is_native == true, call this instead of executing body. */
+  MiRtNativeFn native_fn;
 };
 
 typedef struct MiRtDictEntry
@@ -123,7 +135,7 @@ struct MiRtBlock
 
 typedef struct MiRtVar
 {
-  XSlice            name;
+  uint32_t          sym_id;
   MiRtValue         value;
   struct MiRtVar*   next;
 } MiRtVar;
@@ -134,6 +146,7 @@ void          mi_rt_scope_destroy(MiRuntime* rt, MiScopeFrame* frame);
 
 typedef struct MiScopeFrame
 {
+  MiRuntime*           rt;
   XArena*              arena;
   MiRtVar*             vars;
   struct MiScopeFrame* parent;
@@ -170,9 +183,22 @@ struct MiRuntime
   size_t            command_capacity;
 
   MiRtExecBlockFn   exec_block;
+
+  XSlice*           sym_names;
+  size_t            sym_count;
+  size_t            sym_capacity;
 };
 
 MiHeapStats mi_rt_heap_stats(const MiRuntime* rt);
+
+uint32_t  mi_rt_sym_intern(MiRuntime* rt, XSlice name);
+XSlice    mi_rt_sym_name(const MiRuntime* rt, uint32_t sym_id);
+
+bool      mi_rt_var_get_id(MiRuntime* rt, uint32_t sym_id, MiRtValue* out);
+bool      mi_rt_var_get_from_id(MiScopeFrame* start, uint32_t sym_id, MiRtValue* out);
+void      mi_rt_var_set_from_id(MiScopeFrame* start, uint32_t sym_id, MiRtValue value);
+void      mi_rt_var_define_id(MiRuntime* rt, uint32_t sym_id, MiRtValue value);
+void      mi_rt_var_set_id(MiRuntime* rt, uint32_t sym_id, MiRtValue value);
 
 //----------------------------------------------------------
 // Refcount helpers
@@ -223,7 +249,6 @@ void mi_rt_scope_push_with_parent(MiRuntime* rt, MiScopeFrame* parent);
  * @param rt     Runtime instance.
  * @param parent Parent frame for the new frame.
  */
-void mi_rt_scope_push_with_parent(MiRuntime* rt, MiScopeFrame* parent);
 
 /**
  * Pop the current scope frame.
@@ -321,6 +346,7 @@ void mi_rt_pair_set(MiRuntime* rt, MiRtPair* pair, int index, MiRtValue v);
  */
 MiRtBlock* mi_rt_block_create(MiRuntime* rt);
 MiRtCmd*   mi_rt_cmd_create(MiRuntime* rt, uint32_t param_count, const XSlice* param_names, MiRtValue body);
+MiRtCmd*   mi_rt_cmd_create_native(MiRuntime* rt, MiRtNativeFn native_fn);
 
 /**
  * Append a value to a runtime list.

@@ -6,6 +6,7 @@
 #include "mi_typecheck.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 #include <stdx_strbuilder.h>
 
@@ -47,6 +48,22 @@ static bool s_slice_eq(const XSlice a, const XSlice b)
     return true;
   }
   return memcmp(a.ptr, b.ptr, a.length) == 0;
+}
+
+static bool s_slice_has_double_colon(XSlice s)
+{
+  if (s.length < 2)
+  {
+    return false;
+  }
+  for (size_t i = 0; i + 1 < s.length; i += 1)
+  {
+    if (s.ptr[i] == ':' && s.ptr[i + 1] == ':')
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 static XSlice s_slice_dup_heap(XSlice s)
@@ -226,13 +243,21 @@ static int32_t s_chunk_add_symbol(MiVmChunk* c, XSlice name)
 
   if (c->symbol_count == c->symbol_capacity)
   {
+    size_t old_cap = c->symbol_capacity;
     size_t new_cap = c->symbol_capacity ? c->symbol_capacity * 2u : 64u;
     c->symbols = (XSlice*) s_realloc(c->symbols, new_cap * sizeof(*c->symbols));
+    c->symbol_ids = (uint32_t*) s_realloc(c->symbol_ids, new_cap * sizeof(*c->symbol_ids));
+    for (size_t i = old_cap; i < new_cap; i += 1)
+    {
+      c->symbol_ids[i] = UINT32_MAX;
+    }
     c->symbol_capacity = new_cap;
   }
 
   int32_t idx = (int32_t) c->symbol_count;
-  c->symbols[c->symbol_count++] = s_slice_dup_heap(name);
+  c->symbols[c->symbol_count] = s_slice_dup_heap(name);
+  c->symbol_ids[c->symbol_count] = UINT32_MAX;
+  c->symbol_count += 1;
   return idx;
 }
 
@@ -615,6 +640,20 @@ Falls back to regular command dispatch for indirect names. */
       return dst;
     }
 
+    /* lvalue: target::member */
+    if (lvalue->kind == MI_EXPR_QUAL)
+    {
+      uint8_t base_reg = s_compile_expr(b, lvalue->as.qual.target);
+      uint8_t rhs_reg = s_compile_expr(b, rhs);
+      int32_t sym = s_chunk_add_symbol(b->chunk, lvalue->as.qual.member);
+      s_emit(b, MI_VM_OP_STORE_MEMBER, rhs_reg, base_reg, 0, sym);
+      if (wants_result)
+      {
+        s_emit(b, MI_VM_OP_MOV, dst, rhs_reg, 0, 0);
+      }
+      return dst;
+    }
+
     /* Indirect or unsupported lvalue: fall back to command call. */
   }
 
@@ -681,17 +720,38 @@ argument is a block.
     s_emit(b, MI_VM_OP_ARG_CLEAR, 0, 0, 0, 0);
     argc = 0;
 
-    uint8_t name_reg = s_compile_expr(b, cmd_name_expr);
-    s_emit(b, MI_VM_OP_ARG_PUSH, name_reg, 0, 0, 0);
-    argc += 1;
+    /* cmd name is usually a literal identifier; push it as a symbol name
+       without going through the const pool, so dumps stay readable and
+       bytecode stays tight. */
+    if (cmd_name_expr->kind == MI_EXPR_STRING_LITERAL)
+    {
+      int32_t sym = s_chunk_add_symbol(b->chunk, cmd_name_expr->as.string_lit.value);
+      s_emit(b, MI_VM_OP_ARG_PUSH_SYM, 0, 0, 0, sym);
+      argc += 1;
+    }
+    else
+    {
+      uint8_t name_reg = s_compile_expr(b, cmd_name_expr);
+      s_emit(b, MI_VM_OP_ARG_PUSH, name_reg, 0, 0, 0);
+      argc += 1;
+    }
 
     /* Push parameter names (raw expressions) in order. */
     const MiExprList* cur = params_it;
     while (cur && cur->next)
     {
-      uint8_t preg = s_compile_expr(b, cur->expr);
-      s_emit(b, MI_VM_OP_ARG_PUSH, preg, 0, 0, 0);
-      argc += 1;
+      if (cur->expr && cur->expr->kind == MI_EXPR_STRING_LITERAL)
+      {
+        int32_t psym = s_chunk_add_symbol(b->chunk, cur->expr->as.string_lit.value);
+        s_emit(b, MI_VM_OP_ARG_PUSH_SYM, 0, 0, 0, psym);
+        argc += 1;
+      }
+      else
+      {
+        uint8_t preg = s_compile_expr(b, cur->expr);
+        s_emit(b, MI_VM_OP_ARG_PUSH, preg, 0, 0, 0);
+        argc += 1;
+      }
       cur = cur->next;
     }
 
@@ -700,7 +760,7 @@ argument is a block.
     argc += 1;
 
     int32_t cmd_id = s_chunk_add_cmd_fn(b->chunk, x_slice_from_cstr("cmd"), cmd_fn);
-    s_emit(b, MI_VM_OP_CALL_CMD, dst, argc, 0, cmd_id);
+    s_emit(b, MI_VM_OP_CALL_CMD_FAST, dst, argc, 0, cmd_id);
     return dst;
   }
 
@@ -1300,27 +1360,34 @@ must preserve the arg stack (ARG_SAVE/ARG_RESTORE). */
     if (fn)
     {
       int32_t cmd_id = s_chunk_add_cmd_fn(b->chunk, name, fn);
-      s_emit(b, MI_VM_OP_CALL_CMD, dst, argc, 0, cmd_id);
-    }
-    else
-    {
-      // Late-bound command: allow user-defined commands created earlier in the script.
-      uint8_t head_reg = s_alloc_reg(b);
-      /* If there is a variable with this name in the current chunk,
-         treat the call as call-by-value (the variable must evaluate
-         to a command name string). This is required for patterns like:
-         foreach(n, list) { n(); }
-         where n is a loop variable holding "foo"/"bar". */
-      int32_t sym = s_chunk_find_symbol(b->chunk, name);
-      if (sym >= 0)
+      if (s_slice_has_double_colon(name))
       {
-        s_emit(b, MI_VM_OP_LOAD_VAR, head_reg, 0, 0, sym);
+        s_emit(b, MI_VM_OP_CALL_CMD, dst, argc, 0, cmd_id);
       }
       else
       {
-        int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_string_slice(name));
-        s_emit(b, MI_VM_OP_LOAD_CONST, head_reg, 0, 0, k);
+        s_emit(b, MI_VM_OP_CALL_CMD_FAST, dst, argc, 0, cmd_id);
       }
+    }
+    else
+    {
+      /* Late-bound identifier head.
+         For identifier calls like:
+           dispatch(10, 20, print)
+         we want call-by-value (dispatch is a variable containing a block/cmd).
+
+         This also supports patterns like:
+           foreach(n, list) { n(); }
+         where n holds a string name "foo"/"bar"; MI_VM_OP_CALL_CMD_DYN
+         will resolve strings when needed.
+
+         If the variable is not defined at runtime, this will error out,
+         and reflective call-by-name can still be expressed explicitly
+         by producing a string value and calling it indirectly.
+      */
+      uint8_t head_reg = s_alloc_reg(b);
+      int32_t sym = s_chunk_add_symbol(b->chunk, name);
+      s_emit(b, MI_VM_OP_LOAD_VAR, head_reg, 0, 0, sym);
       s_emit(b, MI_VM_OP_CALL_CMD_DYN, dst, head_reg, argc, 0);
     }
 
@@ -1421,6 +1488,16 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
 
         int32_t sym = s_chunk_add_symbol(b->chunk, e->as.var.name);
         s_emit(b, MI_VM_OP_LOAD_VAR, r, 0, 0, sym);
+        return r;
+      }
+
+    case MI_EXPR_QUAL:
+      {
+        // target::member
+        uint8_t base = s_compile_expr(b, e->as.qual.target);
+        uint8_t r = s_alloc_reg(b);
+        int32_t mem_sym = s_chunk_add_symbol(b->chunk, e->as.qual.member);
+        s_emit(b, MI_VM_OP_LOAD_MEMBER, r, base, 0, mem_sym);
         return r;
       }
 
@@ -1605,11 +1682,172 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
     }
   }
 
+  //----------------------------------------------------------
+  // include/import validations (top-level only)
+  //----------------------------------------------------------
+  /*
+    Validations (top-level only):
+      1) include "foo" as foo; repeated -> warning (redundant)
+      2) include "foo" as a; include "foo" as b; -> ok (aliasing)
+      3) include "foo" as x; include "bar" as x; -> error (conflicting alias)
+
+    We only apply these validations to the include/import statement sugar
+    (MiCommand.is_include_stmt), which always uses a string-literal path.
+  */
+  typedef struct MiIncludeAliasEntry
+  {
+    XSlice  alias;
+    XSlice  path;
+    MiToken prev_alias_tok;
+    MiToken prev_path_tok;
+  } MiIncludeAliasEntry;
+
+  MiIncludeAliasEntry* include_aliases = NULL;
+  size_t include_alias_count = 0;
+  size_t include_alias_cap = 0;
+
+  {
+    const MiCommandList* vit = script ? script->first : NULL;
+    while (vit)
+    {
+      const MiCommand* vcmd = vit->command;
+      if (vcmd && vcmd->is_include_stmt)
+      {
+        const MiExprList* a0 = vcmd->args;
+        const MiExpr* path_expr = a0 ? a0->expr : NULL;
+        const XSlice path = path_expr ? path_expr->token.lexeme : x_slice_empty();
+        const XSlice alias = vcmd->include_alias_tok.lexeme;
+
+        /* Find existing alias binding, if any. */
+        size_t found = (size_t)-1;
+        for (size_t i = 0; i < include_alias_count; i += 1)
+        {
+          if (x_slice_eq(include_aliases[i].alias, alias))
+          {
+            found = i;
+            break;
+          }
+        }
+
+        if (found != (size_t)-1)
+        {
+          const MiIncludeAliasEntry* prev = &include_aliases[found];
+          if (!x_slice_eq(prev->path, path))
+          {
+            /* Conflicting alias: different modules bound to same alias. */
+            if (dbg_file.length > 0)
+            {
+              mi_error_fmt("%.*s:%d:%d: error: alias '%.*s' already bound to module \"%.*s\"\n",
+                  (int)dbg_file.length,
+                  (const char*)dbg_file.ptr,
+                  vcmd->include_alias_tok.line,
+                  vcmd->include_alias_tok.column,
+                  (int)alias.length,
+                  (const char*)alias.ptr,
+                  (int)prev->path.length,
+                  (const char*)prev->path.ptr);
+
+              mi_error_fmt("%.*s:%d:%d: note: previous include of \"%.*s\" here\n",
+                  (int)dbg_file.length,
+                  (const char*)dbg_file.ptr,
+                  prev->prev_alias_tok.line,
+                  prev->prev_alias_tok.column,
+                  (int)prev->path.length,
+                  (const char*)prev->path.ptr);
+            }
+            else
+            {
+              mi_error_fmt("error: alias '%.*s' already bound to module \"%.*s\"\n",
+                  (int)alias.length,
+                  (const char*)alias.ptr,
+                  (int)prev->path.length,
+                  (const char*)prev->path.ptr);
+            }
+            free(include_aliases);
+            return NULL;
+          }
+
+          /* Same module + same alias => warn once per repeat site. */
+          if (dbg_file.length > 0)
+          {
+            mi_warning_fmt("%.*s:%d:%d: warning: module \"%.*s\" included more than once with alias '%.*s'\n",
+                (int)dbg_file.length,
+                (const char*)dbg_file.ptr,
+                vcmd->include_alias_tok.line,
+                vcmd->include_alias_tok.column,
+                (int)path.length,
+                (const char*)path.ptr,
+                (int)alias.length,
+                (const char*)alias.ptr);
+          }
+          else
+          {
+            mi_warning_fmt("warning: module \"%.*s\" included more than once with alias '%.*s'\n",
+                (int)path.length,
+                (const char*)path.ptr,
+                (int)alias.length,
+                (const char*)alias.ptr);
+          }
+        }
+        else
+        {
+          if (include_alias_count == include_alias_cap)
+          {
+            size_t new_cap = include_alias_cap ? (include_alias_cap * 2u) : 8u;
+            MiIncludeAliasEntry* p = (MiIncludeAliasEntry*)s_realloc(include_aliases, new_cap * sizeof(MiIncludeAliasEntry));
+            if (!p)
+            {
+              free(include_aliases);
+              mi_error("mi_compile: out of memory\n");
+              return NULL;
+            }
+            include_aliases = p;
+            include_alias_cap = new_cap;
+          }
+
+          MiIncludeAliasEntry e;
+          memset(&e, 0, sizeof(e));
+          e.alias = alias;
+          e.path = path;
+          e.prev_alias_tok = vcmd->include_alias_tok;
+          e.prev_path_tok = path_expr ? path_expr->token : vcmd->include_alias_tok;
+          include_aliases[include_alias_count] = e;
+          include_alias_count += 1u;
+        }
+      }
+      vit = vit->next;
+    }
+  }
+
+  free(include_aliases);
+
   const MiCommandList* it = script ? script->first : NULL;
   while (it)
   {
     const MiCommand* cmd = it->command;
     b.next_reg = 0;
+
+    /* include/import statement sugar:
+         include "..." as name;
+       Lowers to:
+         r0 = include("...")
+         name = r0
+       This keeps the runtime include command simple (no "as" argument). */
+    if (cmd && cmd->is_include_stmt)
+    {
+      MiExpr fake;
+      memset(&fake, 0, sizeof(fake));
+      fake.kind = MI_EXPR_COMMAND;
+      fake.as.command.head = cmd->head;
+      fake.as.command.args = cmd->args;
+      fake.as.command.argc = (unsigned int)cmd->argc;
+
+      uint8_t dst = s_compile_command_expr(&b, &fake, true);
+      int32_t sym = s_chunk_add_symbol(b.chunk, cmd->include_alias_tok.lexeme);
+      s_emit(&b, MI_VM_OP_STORE_VAR, dst, 0, 0, sym);
+      it = it->next;
+      continue;
+    }
 
     // Compile as a command expression: head :: args...
     MiExpr fake;

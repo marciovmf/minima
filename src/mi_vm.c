@@ -1,13 +1,229 @@
 #include "mi_vm.h"
 #include "mi_log.h"
 #include "mi_mx.h"
+#include "mi_compile.h"
+#include "stdx_string.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <time.h>
 
 #include <stdx_strbuilder.h>
+#include <stdx_filesystem.h>
 
+static XSlice s_vm_current_script_file(MiVm* vm)
+{
+  if (!vm)
+  {
+    return x_slice_empty();
+  }
+
+  if (vm->dbg_chunk && vm->dbg_chunk->dbg_file.length)
+  {
+    return vm->dbg_chunk->dbg_file;
+  }
+
+  /* Some subchunks may not carry dbg_file; walk the VM call stack to find
+     the nearest caller chunk with a file name.
+  */
+  for (int i = vm->call_depth - 1; i >= 0; --i)
+  {
+    const MiVmChunk* c = vm->call_stack[i].caller_chunk;
+    if (c && c->dbg_file.length)
+    {
+      return c->dbg_file;
+    }
+  }
+
+  return x_slice_empty();
+}
+
+static void s_vm_print_source_context_from_file(XSlice file, uint32_t line, uint32_t col)
+{
+  if (!file.ptr || file.length == 0 || line == 0)
+  {
+    return;
+  }
+
+  char path[1024];
+  size_t n = file.length;
+  if (n >= sizeof(path))
+  {
+    n = sizeof(path) - 1;
+  }
+  memcpy(path, file.ptr, n);
+  path[n] = '\0';
+
+  FILE* f = fopen(path, "rb");
+  if (!f)
+  {
+    return;
+  }
+
+  /* Read whole file (small scripts). */
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (sz <= 0 || sz > (long)(1024 * 1024 * 8))
+  {
+    fclose(f);
+    return;
+  }
+
+  char* buf = (char*)malloc((size_t)sz + 1u);
+  if (!buf)
+  {
+    fclose(f);
+    return;
+  }
+
+  size_t got = fread(buf, 1, (size_t)sz, f);
+  fclose(f);
+  buf[got] = '\0';
+
+  XSlice src = x_slice_init(buf, got);
+
+  int cur_line = 1;
+  size_t i = 0;
+  size_t line_start = 0;
+  size_t line_end = src.length;
+
+  while (i < src.length)
+  {
+    if (cur_line == (int)line)
+    {
+      line_start = i;
+      break;
+    }
+    if (src.ptr[i] == '\n')
+    {
+      cur_line += 1;
+    }
+    i += 1;
+  }
+
+  i = line_start;
+  while (i < src.length)
+  {
+    if (src.ptr[i] == '\n')
+    {
+      line_end = i;
+      break;
+    }
+    i += 1;
+  }
+
+  if (line_start < src.length && line_end > line_start)
+  {
+    XSlice ln = x_slice_init(src.ptr + line_start, line_end - line_start);
+    mi_error_fmt("  %.*s\n", (int)ln.length, ln.ptr);
+
+    uint32_t caret_col = col;
+    if (caret_col == 0)
+    {
+      caret_col = 1;
+    }
+
+    mi_error("  ");
+    for (uint32_t c = 1; c < caret_col; c += 1)
+    {
+      mi_error(" ");
+    }
+    mi_error("^\n");
+  }
+
+  free(buf);
+}
+
+static void s_vm_report_error(MiVm* vm, const char* msg)
+{
+  if (!vm)
+  {
+    mi_error_fmt("mi_vm: %s\n", msg ? msg : "error");
+    return;
+  }
+
+  const MiVmChunk* chunk = vm->dbg_chunk;
+  uint32_t line = 0;
+  uint32_t col = 0;
+  XSlice file = x_slice_empty();
+
+  if (chunk && chunk->dbg_lines && chunk->dbg_cols && vm->dbg_ip < chunk->code_count)
+  {
+    line = chunk->dbg_lines[vm->dbg_ip];
+    col = chunk->dbg_cols[vm->dbg_ip];
+  }
+  if (chunk)
+  {
+    file = chunk->dbg_file;
+  }
+
+  if (file.ptr && file.length > 0 && line > 0)
+  {
+    mi_error_fmt("Runtime error: %s (%.*s:%u:%u)\n",
+        msg ? msg : "error",
+        (int)file.length,
+        file.ptr,
+        (unsigned)line,
+        (unsigned)col);
+  }
+  else
+  {
+    mi_error_fmt("Runtime error: %s\n", msg ? msg : "error");
+  }
+
+  /* Print call stack (most recent last). */
+  if (vm->call_depth > 0)
+  {
+    mi_error("Call stack:\n");
+    for (int i = vm->call_depth - 1; i >= 0; i -= 1)
+    {
+      MiVmCallFrame* fr = &vm->call_stack[i];
+      if (fr->caller_chunk && fr->caller_chunk->dbg_file.ptr && fr->caller_chunk->dbg_file.length > 0 &&
+          fr->caller_chunk->dbg_lines && fr->caller_ip < fr->caller_chunk->code_count)
+      {
+        uint32_t fl = fr->caller_chunk->dbg_lines[fr->caller_ip];
+        uint32_t fc = fr->caller_chunk->dbg_cols ? fr->caller_chunk->dbg_cols[fr->caller_ip] : 0;
+        if (fr->kind == MI_VM_CALL_FRAME_USER_CMD)
+        {
+          mi_error_fmt("  cmd %.*s at %.*s:%u:%u\n",
+              (int)fr->name.length,
+              fr->name.ptr,
+              (int)fr->caller_chunk->dbg_file.length,
+              fr->caller_chunk->dbg_file.ptr,
+              (unsigned)fl,
+              (unsigned)fc);
+        }
+        else
+        {
+          mi_error_fmt("  block at %.*s:%u:%u\n",
+              (int)fr->caller_chunk->dbg_file.length,
+              fr->caller_chunk->dbg_file.ptr,
+              (unsigned)fl,
+              (unsigned)fc);
+        }
+      }
+      else
+      {
+        if (fr->kind == MI_VM_CALL_FRAME_USER_CMD)
+        {
+          mi_error_fmt("  cmd %.*s\n", (int)fr->name.length, fr->name.ptr);
+        }
+        else
+        {
+          mi_error("  block\n");
+        }
+      }
+    }
+  }
+
+  if (file.ptr && file.length > 0 && line > 0)
+  {
+    s_vm_print_source_context_from_file(file, line, col);
+  }
+}
 //----------------------------------------------------------
 // Internal helpers
 //----------------------------------------------------------
@@ -31,11 +247,46 @@ static void* s_realloc(void* ptr, size_t size)
 
 static void s_vm_reg_set(MiVm* vm, uint8_t r, MiRtValue v)
 {
+  MI_ASSERT(vm);
+  MI_ASSERT(r < MI_VM_REG_COUNT);
   mi_rt_value_assign(vm->rt, &vm->regs[r], v);
 }
 
+static uint32_t s_vm_chunk_sym_id(MiVm* vm, MiVmChunk* chunk, int32_t sym_index)
+{
+  if (!vm || !chunk)
+  {
+    return 0u;
+  }
+
+  if (sym_index < 0 || (size_t)sym_index >= chunk->symbol_count)
+  {
+    return 0u;
+  }
+
+  if (!chunk->symbol_ids)
+  {
+    chunk->symbol_ids = (uint32_t*)s_realloc(NULL, chunk->symbol_capacity * sizeof(*chunk->symbol_ids));
+    for (size_t i = 0; i < chunk->symbol_capacity; i += 1)
+    {
+      chunk->symbol_ids[i] = UINT32_MAX;
+    }
+  }
+
+  if (chunk->symbol_ids[sym_index] == UINT32_MAX)
+  {
+    chunk->symbol_ids[sym_index] = mi_rt_sym_intern(vm->rt, chunk->symbols[sym_index]);
+  }
+
+  return chunk->symbol_ids[sym_index];
+}
+
+
 static void s_vm_arg_clear(MiVm* vm)
 {
+  MI_ASSERT(vm);
+  MI_ASSERT(vm->arg_top >= 0);
+  MI_ASSERT(vm->arg_top <= MI_VM_ARG_STACK_COUNT);
   for (int i = 0; i < vm->arg_top; ++i)
   {
     mi_rt_value_assign(vm->rt, &vm->arg_stack[i], mi_rt_make_void());
@@ -697,6 +948,18 @@ static MiRtValue s_vm_exec_cmd_value(MiVm* vm, XSlice cmd_name, MiRtValue cmd_va
   }
 
   MiRtCmd* c = cmd_value.as.cmd;
+
+  if (c->is_native)
+  {
+    if (!c->native_fn)
+    {
+      mi_error("mi_vm: native cmd missing function pointer\n");
+      return mi_rt_make_void();
+    }
+
+    return c->native_fn(vm, cmd_name, argc, argv);
+  }
+
   if (c->body.kind != MI_RT_VAL_BLOCK || !c->body.as.block || c->body.as.block->kind != MI_RT_BLOCK_VM_CHUNK)
   {
     mi_error("mi_vm: invalid cmd body\n");
@@ -981,6 +1244,293 @@ static MiRtValue s_vm_exec_qualified_cmd(MiVm* vm, XSlice full_name, int argc, c
   return mi_rt_make_void();
 }
 
+//----------------------------------------------------------
+// include: cache helpers
+//----------------------------------------------------------
+
+static bool s_vm_get_cache_root(MiVm* vm, XFSPath* out_root);
+
+static uint64_t s_hash_fnv1a64(const void* data, size_t len)
+{
+  const uint8_t* p = (const uint8_t*)data;
+  uint64_t h = 1469598103934665603ULL;
+  for (size_t i = 0; i < len; ++i)
+  {
+    h ^= (uint64_t)p[i];
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+static void s_hex_u64(char out[17], uint64_t v)
+{
+  static const char* k_hex = "0123456789abcdef";
+  for (int i = 15; i >= 0; --i)
+  {
+    out[i] = k_hex[(int)(v & 0xFULL)];
+    v >>= 4ULL;
+  }
+  out[16] = 0;
+}
+
+static char* s_strdup(const char* s)
+{
+  if (!s)
+  {
+    return NULL;
+  }
+  size_t n = strlen(s);
+  char* p = (char*)malloc(n + 1u);
+  if (!p)
+  {
+    return NULL;
+  }
+  memcpy(p, s, n);
+  p[n] = 0;
+  return p;
+}
+
+static bool s_vm_cached_mx_for_mi(MiVm* vm, const char* src_mi, XFSPath* out_mx)
+{
+  if (!vm || !src_mi || !out_mx)
+  {
+    return false;
+  }
+
+  XFSPath cache_root;
+  if (!s_vm_get_cache_root(vm, &cache_root))
+  {
+    return false;
+  }
+  (void)x_fs_directory_create_recursive(cache_root.buf);
+
+  uint64_t h = s_hash_fnv1a64(src_mi, strlen(src_mi));
+  char hex[17];
+  s_hex_u64(hex, h);
+
+  XFSPath cache_dir = cache_root;
+  (void)x_fs_path_join(&cache_dir, hex);
+  (void)x_fs_directory_create_recursive(cache_dir.buf);
+
+  XFSPath mx_name;
+  {
+    XSlice base = x_fs_path_basename(src_mi);
+    XSmallstr tmp;
+    (void)x_smallstr_from_slice(base, &tmp);
+    x_fs_path_set(&mx_name, x_smallstr_cstr(&tmp));
+  }
+  (void)x_fs_path_change_extension(&mx_name, ".mx");
+
+  *out_mx = cache_dir;
+  (void)x_fs_path_join(out_mx, mx_name.buf);
+  return true;
+}
+
+static MiRtValue s_vm_module_cache_get(MiVm* vm, const char* key, bool* out_found)
+{
+  if (out_found)
+  {
+    *out_found = false;
+  }
+
+  if (!vm || !key)
+  {
+    return mi_rt_make_void();
+  }
+
+  for (size_t i = 0; i < vm->module_cache_count; ++i)
+  {
+    if (vm->module_cache[i].key && strcmp(vm->module_cache[i].key, key) == 0)
+    {
+      if (out_found)
+      {
+        *out_found = true;
+      }
+      return vm->module_cache[i].value;
+    }
+  }
+
+  return mi_rt_make_void();
+}
+
+static void s_vm_module_cache_set(MiVm* vm, const char* key, MiRtValue value)
+{
+  if (!vm || !key)
+  {
+    return;
+  }
+
+  for (size_t i = 0; i < vm->module_cache_count; ++i)
+  {
+    if (vm->module_cache[i].key && strcmp(vm->module_cache[i].key, key) == 0)
+    {
+      vm->module_cache[i].value = value;
+      return;
+    }
+  }
+
+  if (vm->module_cache_count == vm->module_cache_capacity)
+  {
+    size_t new_cap = vm->module_cache_capacity ? vm->module_cache_capacity * 2u : 8u;
+    vm->module_cache = (MiVmModuleCacheEntry*)s_realloc(vm->module_cache, new_cap * sizeof(*vm->module_cache));
+    vm->module_cache_capacity = new_cap;
+  }
+
+  vm->module_cache[vm->module_cache_count].key = s_strdup(key);
+  vm->module_cache[vm->module_cache_count].value = value;
+  vm->module_cache_count += 1u;
+}
+
+static char* s_read_text_file(const char* path, size_t* out_len)
+{
+  if (out_len)
+  {
+    *out_len = 0;
+  }
+
+  FILE* f = fopen(path, "rb");
+  if (!f)
+  {
+    return NULL;
+  }
+
+  if (fseek(f, 0, SEEK_END) != 0)
+  {
+    fclose(f);
+    return NULL;
+  }
+
+  long sz = ftell(f);
+  if (sz < 0)
+  {
+    fclose(f);
+    return NULL;
+  }
+
+  if (fseek(f, 0, SEEK_SET) != 0)
+  {
+    fclose(f);
+    return NULL;
+  }
+
+  char* buf = (char*)malloc((size_t)sz + 1u);
+  if (!buf)
+  {
+    fclose(f);
+    return NULL;
+  }
+
+  size_t rd = fread(buf, 1u, (size_t)sz, f);
+  fclose(f);
+  if (rd != (size_t)sz)
+  {
+    free(buf);
+    return NULL;
+  }
+  buf[rd] = 0;
+
+  if (out_len)
+  {
+    *out_len = rd;
+  }
+  return buf;
+}
+
+static bool s_compile_mi_to_mx(MiVm* vm, const char* mi_file, const char* mx_file)
+{
+  size_t src_len = 0;
+  char* src = s_read_text_file(mi_file, &src_len);
+  if (!src)
+  {
+    mi_error_fmt("include: failed to read: %s\n", mi_file);
+    return false;
+  }
+
+  XArena* arena = x_arena_create(1024 * 64);
+  if (!arena)
+  {
+    mi_error("include: failed to create parser arena\n");
+    free(src);
+    return false;
+  }
+
+  MiParseResult res = mi_parse_program_ex(src, src_len, arena, true);
+  if (!res.ok || !res.script)
+  {
+    mi_parse_print_error(x_slice_init(src, src_len), &res);
+    x_arena_destroy(arena);
+    free(src);
+    return false;
+  }
+
+  MiVmChunk* ch = mi_compile_vm_script_ex(vm, res.script, x_slice_from_cstr("<module>"), x_slice_from_cstr(mi_file));
+  x_arena_destroy(arena);
+  free(src);
+  if (!ch)
+  {
+    mi_error_fmt("include: compilation failed: %s\n", mi_file);
+    return false;
+  }
+
+  bool ok = mi_mx_save_file(ch, mx_file);
+  mi_vm_chunk_destroy(ch);
+  if (!ok)
+  {
+    mi_error_fmt("include: failed to write MIX file: %s\n", mx_file);
+    return false;
+  }
+
+  return true;
+}
+
+static bool s_vm_get_cache_root(MiVm* vm, XFSPath* out_root)
+{
+  if (!out_root)
+  {
+    return false;
+  }
+
+  x_fs_path_set(out_root, "");
+
+  if (vm && vm->cache_dir_set)
+  {
+    *out_root = vm->cache_dir;
+    return true;
+  }
+
+#ifdef _WIN32
+  const char* app = getenv("LOCALAPPDATA");
+  if (app && app[0])
+  {
+    (void)x_fs_path_set(out_root, app);
+    (void)x_fs_path_join(out_root, "minima");
+    return true;
+  }
+#else
+  const char* xdg = getenv("XDG_CACHE_HOME");
+  if (xdg && xdg[0])
+  {
+    (void)x_fs_path_set(out_root, xdg);
+    (void)x_fs_path_join(out_root, "minima");
+    return true;
+  }
+  const char* home = getenv("HOME");
+  if (home && home[0])
+  {
+    (void)x_fs_path_set(out_root, home);
+    (void)x_fs_path_join(out_root, ".cache", "minima");
+    return true;
+  }
+#endif
+
+  if (!x_fs_get_temp_folder(out_root))
+  {
+    return false;
+  }
+  (void)x_fs_path_join(out_root, "minima");
+  return true;
+}
+
 static MiRtValue s_vm_cmd_include(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
 {
   (void)name;
@@ -989,59 +1539,157 @@ static MiRtValue s_vm_cmd_include(MiVm* vm, XSlice name, int argc, const MiRtVal
     return mi_rt_make_void();
   }
 
-  if (argc != 3)
+  if (argc != 1)
   {
-    mi_error("include: expected: include: <module> as <alias>\n");
+    mi_error("include: expected: include: <module_path>\n");
     return mi_rt_make_void();
   }
 
-  if (argv[0].kind != MI_RT_VAL_STRING || argv[1].kind != MI_RT_VAL_STRING || argv[2].kind != MI_RT_VAL_STRING)
+  if (argv[0].kind != MI_RT_VAL_STRING)
   {
-    mi_error("include: arguments must be strings\n");
-    return mi_rt_make_void();
-  }
-
-  if (!s_slice_eq(argv[1].as.s, x_slice_from_cstr("as")))
-  {
-    mi_error("include: expected second argument to be 'as'\n");
+    mi_error("include: argument must be a string\n");
     return mi_rt_make_void();
   }
 
   XSlice module = argv[0].as.s;
-  XSlice alias = argv[2].as.s;
-
-  char* filename = NULL;
-  if (s_slice_ends_with(module, ".mx"))
+  if (!module.length)
   {
-    filename = (char*)calloc(module.length + 1u, 1u);
-    if (!filename)
+    mi_error("include: empty path\n");
+    return mi_rt_make_void();
+  }
+
+  XSlice base_file = s_vm_current_script_file(vm);
+  XSlice base_dir_slice = base_file.length ? x_fs_path_dirname((const char*)base_file.ptr) : x_slice_empty();
+  XFSPath base_dir = {0};
+  //x_fs_path_set(&base_dir, base_dir_slice.length ? (const char*)base_dir_slice.ptr : "");
+  x_fs_path_join_slice(&base_dir, &base_dir_slice);
+
+  XFSPath req;
+  x_fs_path_set(&req, "");
+  {
+    XFSPath mod;
+    x_fs_path_set(&mod, (const char*)module.ptr);
+
+    if (x_fs_path_is_absolute_cstr(mod.buf))
     {
-      mi_error("include: out of memory\n");
-      return mi_rt_make_void();
+      req = mod;
     }
-    memcpy(filename, module.ptr, module.length);
+    else
+    {
+      req = base_dir;
+      (void)x_fs_path_join(&req, mod.buf);
+    }
+  }
+  (void)x_fs_path_normalize(&req);
+
+  /* Candidate source paths. */
+  XFSPath src_mx = req;
+  XFSPath src_mi = req;
+  {
+    XSlice ext = x_fs_path_extension(req.buf);
+    if (ext.length)
+    {
+      if (x_slice_eq_cstr(ext, ".mx"))
+      {
+        src_mx = req;
+        src_mi = req;
+        (void)x_fs_path_change_extension(&src_mi, ".mi");
+      }
+      else if (x_slice_eq_cstr(ext, ".mi"))
+      {
+        src_mi = req;
+        src_mx = req;
+        (void)x_fs_path_change_extension(&src_mx, ".mx");
+      }
+      else
+      {
+        src_mi = req;
+        src_mx = req;
+        (void)x_fs_path_change_extension(&src_mi, ".mi");
+        (void)x_fs_path_change_extension(&src_mx, ".mx");
+      }
+    }
+    else
+    {
+      (void)x_fs_path_change_extension(&src_mi, ".mi");
+      (void)x_fs_path_change_extension(&src_mx, ".mx");
+    }
+  }
+
+  XFSPath load_mx;
+  bool need_compile = false;
+
+  if (x_fs_path_exists(&src_mx))
+  {
+    load_mx = src_mx;
   }
   else
   {
-    filename = (char*)calloc(module.length + 1u + 3u, 1u);
-    if (!filename)
+    if (!x_fs_path_exists(&src_mi))
     {
-      mi_error("include: out of memory\n");
+      mi_error_fmt("include: module not found: %.*s\n", (int)module.length, (const char*)module.ptr);
       return mi_rt_make_void();
     }
-    memcpy(filename, module.ptr, module.length);
-    memcpy(filename + module.length, ".mx", 3u);
+
+    if (!s_vm_cached_mx_for_mi(vm, src_mi.buf, &load_mx))
+    {
+      mi_error("include: failed to resolve cache directory\n");
+      return mi_rt_make_void();
+    }
+
+    time_t mi_time = 0;
+    time_t mx_time = 0;
+    bool mx_exists = x_fs_path_exists(&load_mx);
+    bool have_mi = x_fs_file_modification_time(src_mi.buf, &mi_time);
+    bool have_mx = mx_exists && x_fs_file_modification_time(load_mx.buf, &mx_time);
+
+    need_compile = !mx_exists || !have_mi || !have_mx || (mi_time > mx_time);
+    if (need_compile)
+    {
+      if (!s_compile_mi_to_mx(vm, src_mi.buf, load_mx.buf))
+      {
+        return mi_rt_make_void();
+      }
+    }
+  }
+
+  {
+    uint32_t mx_version = 0;
+    bool have_ver = mi_mx_peek_file_version(load_mx.buf, &mx_version);
+    bool compatible = have_ver && (mx_version == MI_MX_VERSION);
+
+    if (!compatible && x_fs_path_exists(&src_mi))
+    {
+      XFSPath cached_mx;
+      if (!s_vm_cached_mx_for_mi(vm, src_mi.buf, &cached_mx))
+      {
+        mi_error("include: failed to resolve cache directory\n");
+        return mi_rt_make_void();
+      }
+      if (!s_compile_mi_to_mx(vm, src_mi.buf, cached_mx.buf))
+      {
+        return mi_rt_make_void();
+      }
+      load_mx = cached_mx;
+    }
+  }
+
+  {
+    bool hit = false;
+    MiRtValue cached = s_vm_module_cache_get(vm, load_mx.buf, &hit);
+    if (hit)
+    {
+      return cached;
+    }
   }
 
   MiMixProgram prog;
   memset(&prog, 0, sizeof(prog));
-  if (!mi_mx_load_file(vm, filename, &prog))
+  if (!mi_mx_load_file(vm, load_mx.buf, &prog))
   {
-    mi_error_fmt("include: failed to load module: %s\n", filename);
-    free(filename);
+    mi_error_fmt("include: failed to load module: %s\n", load_mx.buf);
     return mi_rt_make_void();
   }
-  free(filename);
 
   /* Track loaded module so it can be freed on VM shutdown. */
   if (vm->module_count == vm->module_capacity)
@@ -1074,7 +1722,8 @@ static MiRtValue s_vm_cmd_include(MiVm* vm, XSlice name, int argc, const MiRtVal
   b->env = env;
 
   MiRtValue block_v = mi_rt_make_block(b);
-  (void)mi_rt_var_set(vm->rt, alias, block_v);
+
+  s_vm_module_cache_set(vm, load_mx.buf, block_v);
   return block_v;
 }
 
@@ -1083,10 +1732,30 @@ static MiRtValue s_vm_cmd_include(MiVm* vm, XSlice name, int argc, const MiRtVal
 // VM init/shutdown
 //----------------------------------------------------------
 
+void mi_vm_set_cache_dir(MiVm* vm, const char* path)
+{
+  if (!vm)
+  {
+    return;
+  }
+
+  vm->cache_dir_set = false;
+  (void)x_fs_path_set(&vm->cache_dir, "");
+
+  if (path && path[0])
+  {
+    (void)x_fs_path_set(&vm->cache_dir, path);
+    (void)x_fs_path_normalize(&vm->cache_dir);
+    vm->cache_dir_set = true;
+  }
+}
+
 void mi_vm_init(MiVm* vm, MiRuntime* rt)
 {
   memset(vm, 0, sizeof(*vm));
   vm->rt = rt;
+  vm->cache_dir_set = false;
+  (void)x_fs_path_set(&vm->cache_dir, "");
   vm->arg_top = 0;
 
   for (int i = 0; i < MI_VM_REG_COUNT; ++i)
@@ -1123,7 +1792,22 @@ void mi_vm_init(MiVm* vm, MiRuntime* rt)
   (void) mi_vm_register_command(vm, x_slice_from_cstr("len"),   s_vm_cmd_len);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("cmd"),   s_vm_cmd_cmd);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("include"), s_vm_cmd_include);
+  (void) mi_vm_register_command(vm, x_slice_from_cstr("import"),  s_vm_cmd_include);
   (void) mi_vm_register_command(vm, x_slice_from_cstr("trace"), s_vm_cmd_trace);
+
+  /* Expose built-in commands as first-class values in the root scope.
+     This enables: x = print; callback(..., print); etc. */
+  for (uint32_t i = 0; i < vm->command_count; ++i)
+  {
+    const MiVmCommandEntry* e = &vm->commands[i];
+    MiRtCmd* c = mi_rt_cmd_create_native(rt, e->fn);
+    if (c)
+    {
+      MiRtValue v = mi_rt_make_cmd(c);
+      (void) mi_rt_var_define(rt, e->name, v);
+      mi_rt_value_release(rt, v);
+    }
+  }
 }
 
 void mi_vm_shutdown(MiVm* vm)
@@ -1168,6 +1852,20 @@ void mi_vm_shutdown(MiVm* vm)
   vm->module_envs = NULL;
   vm->module_env_count = 0u;
   vm->module_env_capacity = 0u;
+
+  if (vm->module_cache)
+  {
+    for (size_t i = 0; i < vm->module_cache_count; ++i)
+    {
+      free(vm->module_cache[i].key);
+      vm->module_cache[i].key = NULL;
+      vm->module_cache[i].value = mi_rt_make_void();
+    }
+    free(vm->module_cache);
+  }
+  vm->module_cache = NULL;
+  vm->module_cache_count = 0u;
+  vm->module_cache_capacity = 0u;
 }
 
 bool mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn)
@@ -1292,6 +1990,11 @@ static void s_vm_chunk_destroy_ex(MiVmChunk* chunk, MiVmChunk** stack, size_t de
     free(chunk->symbols);
   }
 
+  if (chunk->symbol_ids)
+  {
+    free(chunk->symbol_ids);
+  }
+
   free(chunk->cmd_fns);
 
   if (chunk->cmd_names)
@@ -1364,8 +2067,8 @@ static MiRtValue s_vm_binary_compare(MiVmOp op, const MiRtValue* a, const MiRtVa
   {
     switch (op)
     {
-      case MI_VM_OP_EQ:   return mi_rt_make_bool(true);
-      case MI_VM_OP_NEQ:  return mi_rt_make_bool(false);
+      case MI_VM_OP_EQ:   return mi_rt_make_bool(a->kind == b->kind);
+      case MI_VM_OP_NEQ:  return mi_rt_make_bool(a->kind != b->kind);
       default:            return mi_rt_make_void();
     }
   }
@@ -1452,6 +2155,9 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
       case MI_VM_OP_LOAD_BLOCK:
         {
+          MI_ASSERT(ins.a < MI_VM_REG_COUNT);
+          MI_ASSERT(ins.imm < chunk->const_count);
+
           if (ins.imm < 0 || (size_t)ins.imm >= chunk->subchunk_count)
           {
             mi_error("mi_vm: LOAD_BLOCK invalid subchunk index\n");
@@ -1474,6 +2180,9 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
       case MI_VM_OP_LIST_NEW:
         {
+          MI_ASSERT(ins.a < MI_VM_REG_COUNT);
+          MI_ASSERT(ins.b < MI_VM_REG_COUNT);
+
           MiRtList* list = mi_rt_list_create(vm->rt);
           if (!list)
           {
@@ -1485,6 +2194,9 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
       case MI_VM_OP_LIST_PUSH:
         {
+          MI_ASSERT(ins.a < MI_VM_REG_COUNT);
+          MI_ASSERT(ins.b < MI_VM_REG_COUNT);
+
           MiRtValue base = vm->regs[ins.a];
           MiRtValue v = vm->regs[ins.b];
           if (base.kind != MI_RT_VAL_LIST || !base.as.list)
@@ -1508,6 +2220,10 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
       case MI_VM_OP_ITER_NEXT:
         {
+          MI_ASSERT(ins.a < MI_VM_REG_COUNT);
+          MI_ASSERT(ins.b < MI_VM_REG_COUNT);
+          MI_ASSERT(ins.c < MI_VM_REG_COUNT);
+
           uint8_t dst_item = (uint8_t)(ins.imm & 0xFF);
           MiRtValue container = vm->regs[ins.b];
           MiRtValue cursor_v = vm->regs[ins.c];
@@ -1565,6 +2281,10 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
       case MI_VM_OP_INDEX:
         {
+          MI_ASSERT(ins.a < MI_VM_REG_COUNT);
+          MI_ASSERT(ins.b < MI_VM_REG_COUNT);
+          MI_ASSERT(ins.c < MI_VM_REG_COUNT);
+
           MiRtValue base = vm->regs[ins.b];
           MiRtValue key = vm->regs[ins.c];
           if (base.kind == MI_RT_VAL_LIST && base.as.list && key.kind == MI_RT_VAL_INT)
@@ -1632,6 +2352,10 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
       case MI_VM_OP_STORE_INDEX:
         {
+          MI_ASSERT(ins.a < MI_VM_REG_COUNT);
+          MI_ASSERT(ins.b < MI_VM_REG_COUNT);
+          MI_ASSERT(ins.c < MI_VM_REG_COUNT);
+
           MiRtValue base = vm->regs[ins.a];
           MiRtValue key = vm->regs[ins.b];
           MiRtValue value = vm->regs[ins.c];
@@ -1786,26 +2510,61 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
       case MI_VM_OP_LOAD_VAR:
         {
-          XSlice name = chunk->symbols[ins.imm];
+          uint32_t sym_id = s_vm_chunk_sym_id(vm, (MiVmChunk*)chunk, ins.imm);
           MiRtValue v;
-          if (!mi_rt_var_get(vm->rt, name, &v))
+          if (!mi_rt_var_get_id(vm->rt, sym_id, &v))
           {
-            mi_error_fmt("undefined variable: %.*s\n", (int) name.length, name.ptr);
+            XSlice name = chunk->symbols[ins.imm];
+            mi_error_fmt("undefined variable: %.*s", (int)name.length, name.ptr);
             v = mi_rt_make_void();
           }
           s_vm_reg_set(vm, ins.a, v);
         } break;
 
+      case MI_VM_OP_LOAD_MEMBER:
+        {
+          MiRtValue base = vm->regs[ins.b];
+          if (base.kind != MI_RT_VAL_BLOCK || !base.as.block || !base.as.block->env)
+          {
+            mi_error("member access: base is not a chunk/module\n");
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+            break;
+          }
+
+          uint32_t sym_id = s_vm_chunk_sym_id(vm, (MiVmChunk*)chunk, ins.imm);
+          MiRtValue v;
+          if (!mi_rt_var_get_from_id(base.as.block->env, sym_id, &v))
+          {
+            XSlice mem_name = chunk->symbols[ins.imm];
+            mi_error_fmt("unknown member: %.*s\n", (int)mem_name.length, (const char*)mem_name.ptr);
+            v = mi_rt_make_void();
+          }
+          s_vm_reg_set(vm, ins.a, v);
+        } break;
+
+      case MI_VM_OP_STORE_MEMBER:
+        {
+          MiRtValue base = vm->regs[ins.b];
+          if (base.kind != MI_RT_VAL_BLOCK || !base.as.block || !base.as.block->env)
+          {
+            mi_error("member assignment: base is not a chunk/module\n");
+            break;
+          }
+
+          uint32_t sym_id = s_vm_chunk_sym_id(vm, (MiVmChunk*)chunk, ins.imm);
+          mi_rt_var_set_from_id(base.as.block->env, sym_id, vm->regs[ins.a]);
+        } break;
+
       case MI_VM_OP_STORE_VAR:
         {
-          XSlice name = chunk->symbols[ins.imm];
-          (void) mi_rt_var_set(vm->rt, name, vm->regs[ins.a]);
+          uint32_t sym_id = s_vm_chunk_sym_id(vm, (MiVmChunk*)chunk, ins.imm);
+          mi_rt_var_set_id(vm->rt, sym_id, vm->regs[ins.a]);
         } break;
 
       case MI_VM_OP_DEFINE_VAR:
         {
-          XSlice name = chunk->symbols[ins.imm];
-          (void) mi_rt_var_define(vm->rt, name, vm->regs[ins.a]);
+          uint32_t sym_id = s_vm_chunk_sym_id(vm, (MiVmChunk*)chunk, ins.imm);
+          mi_rt_var_define_id(vm->rt, sym_id, vm->regs[ins.a]);
         } break;
 
       case MI_VM_OP_LOAD_INDIRECT_VAR:
@@ -1832,11 +2591,15 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
       case MI_VM_OP_ARG_PUSH:
         {
+          MI_ASSERT(ins.a < MI_VM_REG_COUNT);
+
           if (vm->arg_top >= MI_VM_ARG_STACK_COUNT)
           {
-            mi_error("mi_vm: arg stack overflow\n");
+            s_vm_report_error(vm, "arg stack overflow");
+            MI_ASSERT(vm->arg_top < MI_VM_ARG_STACK_COUNT);
             break;
           }
+
           mi_rt_value_assign(vm->rt, &vm->arg_stack[vm->arg_top], vm->regs[ins.a]);
           vm->arg_top += 1;
         } break;
@@ -1873,13 +2636,36 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             vm->arg_top += 1;
             break;
           }
-          XSlice name = chunk->symbols[ins.imm];
+
+          uint32_t sym_id = s_vm_chunk_sym_id(vm, (MiVmChunk*)chunk, ins.imm);
           MiRtValue v;
-          if (!mi_rt_var_get(vm->rt, name, &v))
+          if (!mi_rt_var_get_id(vm->rt, sym_id, &v))
           {
+            XSlice name = chunk->symbols[ins.imm];
             mi_error_fmt("undefined variable: %.*s\n", (int)name.length, name.ptr);
             v = mi_rt_make_void();
           }
+          mi_rt_value_assign(vm->rt, &vm->arg_stack[vm->arg_top], v);
+          vm->arg_top += 1;
+        } break;
+
+      case MI_VM_OP_ARG_PUSH_SYM:
+        {
+          if (vm->arg_top >= MI_VM_ARG_STACK_COUNT)
+          {
+            mi_error("mi_vm: arg stack overflow\n");
+            break;
+          }
+          if (ins.imm < 0 || (size_t)ins.imm >= chunk->symbol_count)
+          {
+            mi_error("mi_vm: ARG_PUSH_SYM invalid symbol index\n");
+            mi_rt_value_assign(vm->rt, &vm->arg_stack[vm->arg_top], mi_rt_make_void());
+            vm->arg_top += 1;
+            break;
+          }
+
+          XSlice name = chunk->symbols[(size_t)ins.imm];
+          MiRtValue v = mi_rt_make_string_slice(name);
           mi_rt_value_assign(vm->rt, &vm->arg_stack[vm->arg_top], v);
           vm->arg_top += 1;
         } break;
@@ -1993,20 +2779,12 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
         } break;
 
-      case MI_VM_OP_CALL_CMD_DYN:
+      case MI_VM_OP_CALL_CMD_FAST:
         {
-          int argc = (int) ins.c;
+          int argc = (int) ins.b;
           if (argc > vm->arg_top)
           {
             mi_error("mi_vm: arg stack underflow\n");
-            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
-            break;
-          }
-
-          MiRtValue head = vm->regs[ins.b];
-          if (head.kind != MI_RT_VAL_STRING)
-          {
-            mi_error("mi_vm: dynamic command head must be string\n");
             s_vm_reg_set(vm, ins.a, mi_rt_make_void());
             break;
           }
@@ -2024,7 +2802,108 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           }
           vm->arg_top = base;
 
-          /* Qualified call for dynamic heads. */
+          if (!chunk->cmd_names || ins.imm < 0 || (size_t)ins.imm >= chunk->cmd_count)
+          {
+            mi_error("mi_vm: CALL_CMD_FAST bad cmd id\n");
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+            for (int i = 0; i < argc; i += 1)
+            {
+              mi_rt_value_release(vm->rt, argv[i]);
+            }
+            break;
+          }
+
+          XSlice cmd_name = chunk->cmd_names[ins.imm];
+          MiVmCommandFn fn = chunk->cmd_fns[ins.imm];
+          if (!fn)
+          {
+            mi_error("mi_vm: CALL_CMD_FAST null function\n");
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+            for (int i = 0; i < argc; i += 1)
+            {
+              mi_rt_value_release(vm->rt, argv[i]);
+            }
+            break;
+          }
+
+          s_vm_reg_set(vm, ins.a, fn(vm, cmd_name, argc, argv));
+          for (int i = 0; i < argc; i += 1)
+          {
+            mi_rt_value_release(vm->rt, argv[i]);
+          }
+          mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
+        } break;
+
+      case MI_VM_OP_CALL_CMD_DYN:
+        {
+          int argc = (int) ins.c;
+          if (argc > vm->arg_top)
+          {
+            mi_error("mi_vm: arg stack underflow\n");
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+            break;
+          }
+
+          MiRtValue head = vm->regs[ins.b];
+
+          MiRtValue argv[MI_VM_ARG_STACK_COUNT];
+          int base = (int)vm->arg_top - argc;
+          for (int i = 0; i < argc; i += 1)
+          {
+            argv[i] = vm->arg_stack[base + i];
+            mi_rt_value_retain(vm->rt, argv[i]);
+          }
+          for (int i = 0; i < argc; i += 1)
+          {
+            mi_rt_value_assign(vm->rt, &vm->arg_stack[base + i], mi_rt_make_void());
+          }
+          vm->arg_top = base;
+
+          if (head.kind == MI_RT_VAL_CMD)
+          {
+            s_vm_reg_set(vm, ins.a, s_vm_exec_cmd_value(vm, (XSlice){NULL, 0u}, head, argc, argv));
+            for (int i = 0; i < argc; i += 1)
+            {
+              mi_rt_value_release(vm->rt, argv[i]);
+            }
+            mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
+            break;
+          }
+
+          if (head.kind == MI_RT_VAL_BLOCK)
+          {
+            if (argc != 0)
+            {
+              mi_error("mi_vm: cannot call block with args (DCALL)\n");
+              s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+            }
+            else
+            {
+              MiRtValue ret = s_vm_exec_block_value(vm, head, chunk, vm->dbg_ip);
+              s_vm_reg_set(vm, ins.a, ret);
+            }
+
+            for (int i = 0; i < argc; i += 1)
+            {
+              mi_rt_value_release(vm->rt, argv[i]);
+            }
+            mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
+            break;
+          }
+
+          if (head.kind != MI_RT_VAL_STRING)
+          {
+            mi_error("mi_vm: dynamic command head must be string/cmd/block\n");
+            s_vm_reg_set(vm, ins.a, mi_rt_make_void());
+            for (int i = 0; i < argc; i += 1)
+            {
+              mi_rt_value_release(vm->rt, argv[i]);
+            }
+            mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
+            break;
+          }
+
+          /* Qualified call for dynamic heads (string). */
           bool q_ok = false;
           MiRtValue q_ret = s_vm_exec_qualified_cmd(vm, head.as.s, argc, argv, &q_ok);
           if (q_ok)
@@ -2060,6 +2939,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
             s_vm_reg_set(vm, ins.a, fn(vm, head.as.s, argc, argv));
           }
+
           for (int i = 0; i < argc; i += 1)
           {
             mi_rt_value_release(vm->rt, argv[i]);
@@ -2067,7 +2947,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
         } break;
 
-      case MI_VM_OP_CALL_BLOCK:
+case MI_VM_OP_CALL_BLOCK:
         {
           MiRtValue ret = s_vm_exec_block_value(vm, vm->regs[ins.b], chunk, vm->dbg_ip);
           s_vm_reg_set(vm, ins.a, ret);
@@ -2098,6 +2978,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
       case MI_VM_OP_JUMP_IF_TRUE:
       case MI_VM_OP_JUMP_IF_FALSE:
         {
+          MI_ASSERT(ins.a < MI_VM_REG_COUNT);
           MiRtValue c = vm->regs[ins.a];
           bool is_true = false;
           if (c.kind == MI_RT_VAL_BOOL)
@@ -2123,7 +3004,8 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             int64_t npc = (int64_t)pc + (int64_t)ins.imm;
             if (npc < 0 || npc > (int64_t)chunk->code_count)
             {
-              mi_error("mi_vm: JUMP_IF out of range\n");
+              s_vm_report_error(vm, "JUMP_IF out of range");
+              MI_ASSERT(npc >= 0 && npc <= (int64_t)chunk->code_count);
               return last;
             }
             pc = (size_t)npc;
@@ -2132,6 +3014,8 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
       case MI_VM_OP_RETURN:
         {
+          MI_ASSERT(ins.a < MI_VM_REG_COUNT);
+
           MiRtValue ret = vm->regs[ins.a];
           mi_rt_value_retain(vm->rt, ret);
           return ret;
@@ -2141,7 +3025,8 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
         return last;
 
       default:
-        mi_error_fmt("mi_vm: unhandled opcode: %u\n", (unsigned) ins.op);
+        s_vm_report_error(vm, "unhandled opcode");
+        mi_error_fmt("  opcode: %u\n", (unsigned) ins.op);
         return last;
     }
   }
@@ -2184,6 +3069,8 @@ static const char* s_op_name(MiVmOp op)
     case MI_VM_OP_AND:                return "AND";
     case MI_VM_OP_OR:                 return "OR";
     case MI_VM_OP_LOAD_VAR:           return "LDV";
+    case MI_VM_OP_LOAD_MEMBER:        return "LDM";
+    case MI_VM_OP_STORE_MEMBER:       return "STM";
     case MI_VM_OP_STORE_VAR:          return "STV";
     case MI_VM_OP_DEFINE_VAR:         return "DEFV";
     case MI_VM_OP_LOAD_INDIRECT_VAR:  return "LDIV";
@@ -2195,6 +3082,7 @@ static const char* s_op_name(MiVmOp op)
     case MI_VM_OP_ARG_SAVE:           return "ASAVE";
     case MI_VM_OP_ARG_RESTORE:        return "AREST";
     case MI_VM_OP_CALL_CMD:           return "CALL";
+    case MI_VM_OP_CALL_CMD_FAST:      return "CALLF";
     case MI_VM_OP_CALL_CMD_DYN:       return "DCALL";
     case MI_VM_OP_CALL_BLOCK:         return "BCALL";
     case MI_VM_OP_SCOPE_PUSH:         return "SPUSH";
@@ -2414,6 +3302,32 @@ static void s_vm_disasm_ex(const MiVmChunk* chunk, const MiVmChunk** stack, size
         }
         break;
 
+      case MI_VM_OP_LOAD_MEMBER:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, r%u, %d", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, (int)ins.imm);
+        if (ins.imm >= 0 && (size_t)ins.imm < chunk->symbol_count)
+        {
+          XSlice s = chunk->symbols[(size_t)ins.imm];
+          (void)snprintf(comment, sizeof(comment), "sym_%d %.*s", (int)ins.imm, (int)s.length, s.ptr);
+        }
+        else
+        {
+          (void)snprintf(comment, sizeof(comment), "<oob>");
+        }
+        break;
+
+      case MI_VM_OP_STORE_MEMBER:
+        (void)snprintf(instr, sizeof(instr), "%s r%u, r%u, %d", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, (int)ins.imm);
+        if (ins.imm >= 0 && (size_t)ins.imm < chunk->symbol_count)
+        {
+          XSlice s = chunk->symbols[(size_t)ins.imm];
+          (void)snprintf(comment, sizeof(comment), "sym_%d %.*s", (int)ins.imm, (int)s.length, s.ptr);
+        }
+        else
+        {
+          (void)snprintf(comment, sizeof(comment), "<oob>");
+        }
+        break;
+
       case MI_VM_OP_STORE_VAR:
         (void)snprintf(instr, sizeof(instr), "%s %d, r%u", s_op_name(op), (int)ins.imm, (unsigned)ins.a);
         if (ins.imm >= 0 && (size_t)ins.imm < chunk->symbol_count)
@@ -2505,6 +3419,20 @@ static void s_vm_disasm_ex(const MiVmChunk* chunk, const MiVmChunk** stack, size
         break;
 
       case MI_VM_OP_CALL_CMD:
+        {
+          const char* name = "cmd";
+          int name_len = 3;
+          if (chunk->cmd_names && ins.imm >= 0 && (size_t)ins.imm < chunk->cmd_count)
+          {
+            XSlice s = chunk->cmd_names[(size_t)ins.imm];
+            name = s.ptr;
+            name_len = (int)s.length;
+          }
+          (void)snprintf(instr, sizeof(instr), "%s r%u, %u, %.*s", s_op_name(op), (unsigned)ins.a, (unsigned)ins.b, name_len, name);
+          (void)snprintf(comment, sizeof(comment), "cmd_%d", (int)ins.imm);
+        } break;
+
+      case MI_VM_OP_CALL_CMD_FAST:
         {
           const char* name = "cmd";
           int name_len = 3;

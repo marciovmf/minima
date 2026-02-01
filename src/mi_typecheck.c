@@ -50,6 +50,47 @@ static bool s_type_compatible(MiTypeKind got, MiTypeKind expected)
   return got == expected;
 }
 
+
+//----------------------------------------------------------
+// Builtin signatures
+//----------------------------------------------------------
+
+typedef struct MiBuiltinSig
+{
+  const char* name;
+  MiTypeKind  ret_type;
+  const MiTypeKind* param_types;
+  int         param_count;
+  bool        is_variadic;
+  MiTypeKind  variadic_type;
+} MiBuiltinSig;
+
+/* MSVC does not like empty initializer lists for arrays in C mode.
+   Use NULL + count=0 for zero-arg builtins. */
+static const MiTypeKind s_sig_any_params_1[] = { MI_TYPE_ANY };
+
+static const MiBuiltinSig s_builtin_sigs[] =
+{
+  { "print",  MI_TYPE_VOID,   NULL,              0, true,  MI_TYPE_ANY },
+  { "len",    MI_TYPE_INT,    s_sig_any_params_1, 1, false, MI_TYPE_ANY },
+  { "trace",  MI_TYPE_VOID,   NULL,              0, false, MI_TYPE_ANY },
+  { "typeof", MI_TYPE_STRING, s_sig_any_params_1, 1, false, MI_TYPE_ANY },
+  { "type",   MI_TYPE_STRING, s_sig_any_params_1, 1, false, MI_TYPE_ANY },
+  { "t",      MI_TYPE_STRING, s_sig_any_params_1, 1, false, MI_TYPE_ANY },
+};
+
+static const MiBuiltinSig* s_find_builtin_sig(XSlice name)
+{
+  for (int i = 0; i < (int)(sizeof(s_builtin_sigs) / sizeof(s_builtin_sigs[0])); ++i)
+  {
+    XSlice bn = x_slice_from_cstr(s_builtin_sigs[i].name);
+    if (s_slice_eq(name, bn))
+    {
+      return &s_builtin_sigs[i];
+    }
+  }
+  return NULL;
+}
 //----------------------------------------------------------
 // Signature table (linear scan: fine for scripts)
 //----------------------------------------------------------
@@ -73,27 +114,50 @@ static const MiFuncSig* s_find_sig(const MiScript* script, XSlice name)
 }
 
 
-static bool s_tc_match_func_sig(const MiFuncTypeSig* expected, const MiFuncSig* got)
+static bool s_tc_match_params(const MiFuncTypeSig* expected,
+                               MiTypeKind got_ret,
+                               const MiTypeKind* got_params,
+                               int got_param_count,
+                               bool got_is_variadic,
+                               MiTypeKind got_variadic_type)
 {
-  if (!expected || !got)
+  if (!expected)
   {
     return false;
   }
 
-  if (expected->param_count != got->param_count)
+  if (expected->ret_type != MI_TYPE_ANY && expected->ret_type != got_ret)
   {
     return false;
   }
 
-  if (expected->ret_type != MI_TYPE_ANY && expected->ret_type != got->ret_type)
+  if (got_is_variadic)
+  {
+    /* A variadic callee can accept any fixed prefix, as long as types are compatible. */
+    for (int i = 0; i < expected->param_count; ++i)
+    {
+      MiTypeKind e = expected->param_types[i];
+      if (e == MI_TYPE_ANY)
+      {
+        continue;
+      }
+      if (got_variadic_type != MI_TYPE_ANY && e != got_variadic_type)
+      {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (expected->param_count != got_param_count)
   {
     return false;
   }
 
-  for (int i = 0; i < expected->param_count; i++)
+  for (int i = 0; i < expected->param_count; ++i)
   {
     MiTypeKind e = expected->param_types[i];
-    MiTypeKind g = got->params[i].type;
+    MiTypeKind g = got_params[i];
     if (e != MI_TYPE_ANY && e != g)
     {
       return false;
@@ -103,13 +167,41 @@ static bool s_tc_match_func_sig(const MiFuncTypeSig* expected, const MiFuncSig* 
   return true;
 }
 
-static bool s_tc_is_builtin_print_expr(const MiExpr* e)
+static bool s_tc_match_func_sig(const MiFuncTypeSig* expected, const MiFuncSig* got)
 {
-  if (!e || e->kind != MI_EXPR_VAR || e->as.var.is_indirect)
+  if (!expected || !got)
   {
     return false;
   }
-  return s_slice_eq(e->as.var.name, x_slice_init("print", 5));
+
+  MiTypeKind params[64];
+  int count = got->param_count;
+  if (count > (int)(sizeof(params) / sizeof(params[0])))
+  {
+    return false;
+  }
+
+  for (int i = 0; i < count; ++i)
+  {
+    params[i] = got->params[i].type;
+  }
+
+  return s_tc_match_params(expected, got->ret_type, params, count, false, MI_TYPE_ANY);
+}
+
+static bool s_tc_match_builtin_sig(const MiFuncTypeSig* expected, const MiBuiltinSig* got)
+{
+  if (!expected || !got)
+  {
+    return false;
+  }
+
+  return s_tc_match_params(expected,
+                           got->ret_type,
+                           got->param_types,
+                           got->param_count,
+                           got->is_variadic,
+                           got->variadic_type);
 }
 
 //----------------------------------------------------------
@@ -203,28 +295,44 @@ static MiTypeKind s_tc_command_expr(const MiScript* script, const MiExpr* e, MiT
         MiTypeKind expected = sig->params[i].type;
 
 MiFuncTypeSig* expected_func_sig = sig->params[i].func_sig;
-if (expected == MI_TYPE_FUNC && expected_func_sig != NULL)
-{
-  if (!s_tc_is_builtin_print_expr(arg))
-  {
-    const MiFuncSig* got_sig = NULL;
+        if (expected == MI_TYPE_FUNC && expected_func_sig != NULL)
+        {
+          const MiFuncSig* got_sig = NULL;
+          const MiBuiltinSig* got_bsig = NULL;
 
-    if (arg && arg->kind == MI_EXPR_VAR && !arg->as.var.is_indirect)
-    {
-      got_sig = s_find_sig(script, arg->as.var.name);
-    }
-    else if (arg && arg->kind == MI_EXPR_STRING_LITERAL)
-    {
-      got_sig = s_find_sig(script, arg->as.string_lit.value);
-    }
+          if (arg && arg->kind == MI_EXPR_VAR && !arg->as.var.is_indirect)
+          {
+            got_sig = s_find_sig(script, arg->as.var.name);
+            got_bsig = s_find_builtin_sig(arg->as.var.name);
+          }
+          else if (arg && arg->kind == MI_EXPR_STRING_LITERAL)
+          {
+            got_sig = s_find_sig(script, arg->as.string_lit.value);
+            got_bsig = s_find_builtin_sig(arg->as.string_lit.value);
+          }
 
-    if (!got_sig || !s_tc_match_func_sig(expected_func_sig, got_sig))
-    {
-      s_tc_error(err, arg ? arg->token : head->token, "Callback function signature mismatch");
-      return MI_TYPE_ANY;
-    }
-  }
-}
+          if (got_sig)
+          {
+            if (!s_tc_match_func_sig(expected_func_sig, got_sig))
+            {
+              s_tc_error(err, arg ? arg->token : head->token, "Callback function signature mismatch");
+              return MI_TYPE_ANY;
+            }
+          }
+          else if (got_bsig)
+          {
+            if (!s_tc_match_builtin_sig(expected_func_sig, got_bsig))
+            {
+              s_tc_error(err, arg ? arg->token : head->token, "Callback function signature mismatch");
+              return MI_TYPE_ANY;
+            }
+          }
+          else
+          {
+            s_tc_error(err, arg ? arg->token : head->token, "Callback function signature mismatch");
+            return MI_TYPE_ANY;
+          }
+        }
 
         if (!s_type_compatible(got, expected))
         {
@@ -332,8 +440,8 @@ case MI_EXPR_VAR:
       return MI_TYPE_FUNC;
     }
 
-    /* A tiny set of builtins can be passed as callbacks. */
-    if (s_slice_eq(e->as.var.name, x_slice_init("print", 5)))
+    /* Builtins with known signatures can be passed as callbacks. */
+    if (s_find_builtin_sig(e->as.var.name) != NULL)
     {
       return MI_TYPE_FUNC;
     }
@@ -393,96 +501,207 @@ case MI_EXPR_VAR:
 // Function body checking
 //----------------------------------------------------------
 
+static MiTypeKind s_tc_typecheck_command_expr(const MiScript* script, const MiCommand* c, MiTcEnv* env, MiTypecheckError* err)
+{
+  MiExpr fake;
+  memset(&fake, 0, sizeof(fake));
+  fake.kind = MI_EXPR_COMMAND;
+  fake.token = c && c->head ? c->head->token : (MiToken){0};
+  fake.as.command.head = c ? c->head : NULL;
+  fake.as.command.args = c ? c->args : NULL;
+  fake.as.command.argc = c ? (unsigned int)c->argc : 0;
+  return s_tc_expr(script, &fake, env, err);
+}
+
+static bool s_tc_command_definitely_returns(const MiScript* script, const MiCommand* c, const MiFuncSig* sig, MiTcEnv* env, MiTypecheckError* err);
+
+static bool s_tc_script_definitely_returns(const MiScript* script, const MiScript* body, const MiFuncSig* sig, MiTcEnv* env, MiTypecheckError* err)
+{
+  const MiCommandList* it = body ? body->first : NULL;
+  while (it)
+  {
+    const MiCommand* c = it->command;
+    if (c)
+    {
+      bool dr = s_tc_command_definitely_returns(script, c, sig, env, err);
+      if (err && err->message.length > 0)
+      {
+        return false;
+      }
+      if (dr)
+      {
+        return true;
+      }
+    }
+    it = it->next;
+  }
+  return false;
+}
+
+static bool s_tc_if_definitely_returns(const MiScript* script, const MiCommand* c, const MiFuncSig* sig, MiTcEnv* env, MiTypecheckError* err)
+{
+  /* if (cond) {then} else {else} */
+  const MiExprList* args = c->args;
+  if (!args || !args->expr)
+  {
+    return false;
+  }
+
+  /* Typecheck condition */
+  (void)s_tc_expr(script, args->expr, env, err);
+  if (err && err->message.length > 0)
+  {
+    return false;
+  }
+  args = args->next;
+
+  bool saw_else = false;
+  bool all_return = true;
+
+  while (args)
+  {
+    const MiExpr* ex = args->expr;
+    if (ex && ex->kind == MI_EXPR_BLOCK)
+    {
+      MiTcEnv inner = *env;
+      bool br = s_tc_script_definitely_returns(script, ex->as.block.script, sig, &inner, err);
+      if (err && err->message.length > 0)
+      {
+        return false;
+      }
+      all_return = all_return && br;
+      args = args->next;
+      continue;
+    }
+
+    /* else / elseif are encoded as string literal command heads in args list:
+       we accept 'else' followed by block, or 'elseif' cond block. */
+    if (ex && ex->kind == MI_EXPR_STRING_LITERAL && s_slice_eq(ex->as.string_lit.value, x_slice_init("else", 4)))
+    {
+      saw_else = true;
+      args = args->next;
+      continue;
+    }
+
+    if (ex && ex->kind == MI_EXPR_STRING_LITERAL && s_slice_eq(ex->as.string_lit.value, x_slice_init("elseif", 6)))
+    {
+      args = args->next;
+      /* cond */
+      if (!args)
+      {
+        break;
+      }
+      (void)s_tc_expr(script, args->expr, env, err);
+      if (err && err->message.length > 0)
+      {
+        return false;
+      }
+      args = args->next;
+      continue;
+    }
+
+    /* Unknown piece: typecheck expression and move on. */
+    (void)s_tc_expr(script, ex, env, err);
+    if (err && err->message.length > 0)
+    {
+      return false;
+    }
+    args = args->next;
+  }
+
+  if (!saw_else)
+  {
+    return false;
+  }
+
+  return all_return;
+}
+
+static bool s_tc_command_definitely_returns(const MiScript* script, const MiCommand* c, const MiFuncSig* sig, MiTcEnv* env, MiTypecheckError* err)
+{
+  if (!c)
+  {
+    return false;
+  }
+
+  /* return special form */
+  if (c->head && c->head->kind == MI_EXPR_STRING_LITERAL && s_slice_eq(c->head->as.string_lit.value, x_slice_init("return", 6)))
+  {
+    if (sig->ret_type == MI_TYPE_VOID)
+    {
+      if (c->argc > 0)
+      {
+        s_tc_error(err, c->head->token, "Void function cannot return a value");
+        return false;
+      }
+    }
+    else
+    {
+      if (c->argc != 1)
+      {
+        s_tc_error(err, c->head->token, "Non-void function must return exactly one value");
+        return false;
+      }
+      MiTypeKind rt = s_tc_expr(script, c->args ? c->args->expr : NULL, env, err);
+      if (err && err->message.length > 0)
+      {
+        return false;
+      }
+      if (!s_type_compatible(rt, sig->ret_type))
+      {
+        s_tc_error(err, c->head->token, "Return type mismatch");
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /* if special form: only used for definite-return; normal typing happens via expr checks below */
+  if (c->head && c->head->kind == MI_EXPR_STRING_LITERAL && s_slice_eq(c->head->as.string_lit.value, x_slice_init("if", 2)))
+  {
+    /* We still need to typecheck the full command expression so variable inference stays consistent. */
+    (void)s_tc_typecheck_command_expr(script, c, env, err);
+    if (err && err->message.length > 0)
+    {
+      return false;
+    }
+    return s_tc_if_definitely_returns(script, c, sig, env, err);
+  }
+
+  /* default: just typecheck as expression */
+  (void)s_tc_typecheck_command_expr(script, c, env, err);
+  if (err && err->message.length > 0)
+  {
+    return false;
+  }
+  return false;
+}
+
 static bool s_tc_script_in_func(const MiScript* script, const MiScript* body, const MiFuncSig* sig, MiTypecheckError* err)
 {
   MiTcEnv env;
   memset(&env, 0, sizeof(env));
 
-  // Bind parameters.
-  for (int i = 0; i < sig->param_count; i++)
+  for (int i = 0; i < sig->param_count; ++i)
   {
     s_env_set(&env, sig->params[i].name, sig->params[i].type);
   }
 
-  bool saw_return = false;
-
-  const MiCommandList* it = body ? body->first : NULL;
-  while (it)
+  bool definitely_returns = s_tc_script_definitely_returns(script, body, sig, &env, err);
+  if (err && err->message.length > 0)
   {
-    const MiCommand* c = it->command;
-    if (!c)
-    {
-      it = it->next;
-      continue;
-    }
-
-    // return special form.
-    if (c->head && c->head->kind == MI_EXPR_STRING_LITERAL && s_slice_eq(c->head->as.string_lit.value, x_slice_init("return", 6)))
-    {
-      saw_return = true;
-      if (sig->ret_type == MI_TYPE_VOID)
-      {
-        if (c->argc > 0)
-        {
-          s_tc_error(err, c->head->token, "Void function cannot return a value");
-          return false;
-        }
-      }
-      else
-      {
-        if (c->argc != 1)
-        {
-          s_tc_error(err, c->head->token, "Non-void function must return a value");
-          return false;
-        }
-        MiTypeKind rt = s_tc_expr(script, c->args ? c->args->expr : NULL, &env, err);
-        if (err && err->message.length > 0) return false;
-        if (!s_type_compatible(rt, sig->ret_type))
-        {
-          s_tc_error(err, c->head->token, "Return type mismatch");
-          return false;
-        }
-      }
-      it = it->next;
-      continue;
-    }
-
-    // Basic assignment inference: x = expr; is parsed as set(x, expr)
-    if (c->head && c->head->kind == MI_EXPR_STRING_LITERAL && s_slice_eq(c->head->as.string_lit.value, x_slice_init("set", 3)))
-    {
-      if (c->argc == 2 && c->args && c->args->expr && c->args->expr->kind == MI_EXPR_STRING_LITERAL)
-      {
-        XSlice var_name = c->args->expr->as.string_lit.value;
-        MiTypeKind rhs_t = s_tc_expr(script, c->args->next ? c->args->next->expr : NULL, &env, err);
-        if (err && err->message.length > 0) return false;
-        s_env_set(&env, var_name, rhs_t);
-      }
-    }
-
-    // Typecheck all expressions appearing in this command.
-    {
-      MiExpr fake;
-      memset(&fake, 0, sizeof(fake));
-      fake.kind = MI_EXPR_COMMAND;
-      fake.token = c->head ? c->head->token : (MiToken){0};
-      fake.as.command.head = c->head;
-      fake.as.command.args = c->args;
-      fake.as.command.argc = (unsigned int)c->argc;
-      (void)s_tc_expr(script, &fake, &env, err);
-      if (err && err->message.length > 0) return false;
-    }
-
-    it = it->next;
+    return false;
   }
 
-  if (sig->ret_type != MI_TYPE_VOID && !saw_return)
+  if (sig->ret_type != MI_TYPE_VOID && !definitely_returns)
   {
-    s_tc_error(err, sig->name_tok, "Non-void function is missing return");
+    s_tc_error(err, sig->name_tok, "Non-void function is missing a return");
     return false;
   }
 
   return true;
 }
+
 
 //----------------------------------------------------------
 // Public entry
@@ -559,3 +778,81 @@ bool mi_typecheck_script(const MiScript* script, MiTypecheckError* err)
 
   return true;
 }
+
+
+
+static void s_mi_print_source_line_tc(XSlice source, int line, int column)
+{
+  if (!source.ptr || source.length == 0 || line <= 0)
+  {
+    return;
+  }
+
+  int cur_line = 1;
+  size_t i = 0;
+  size_t line_start = 0;
+  size_t line_end = source.length;
+
+  while (i < source.length)
+  {
+    if (cur_line == line)
+    {
+      line_start = i;
+      break;
+    }
+    if (source.ptr[i] == '\n')
+    {
+      cur_line += 1;
+    }
+    i += 1;
+  }
+
+  i = line_start;
+  while (i < source.length)
+  {
+    if (source.ptr[i] == '\n')
+    {
+      line_end = i;
+      break;
+    }
+    i += 1;
+  }
+
+  if (line_start >= source.length || line_end <= line_start)
+  {
+    return;
+  }
+
+  XSlice ln = x_slice_init(source.ptr + line_start, line_end - line_start);
+  mi_error_fmt("  %.*s\n", (int)ln.length, ln.ptr);
+
+  int caret_col = column;
+  if (caret_col <= 0)
+  {
+    caret_col = 1;
+  }
+
+  mi_error("  ");
+  for (int c = 1; c < caret_col; c += 1)
+  {
+    mi_error(" ");
+  }
+  mi_error("^\n");
+}
+
+void mi_typecheck_print_error(XSlice source, const MiTypecheckError* err)
+{
+  if (!err || err->message.length == 0)
+  {
+    return;
+  }
+
+  mi_error_fmt("Typecheck error %d,%d - %.*s\n",
+      err->line,
+      err->column,
+      (int)err->message.length,
+      err->message.ptr);
+
+  s_mi_print_source_line_tc(source, err->line, err->column);
+}
+

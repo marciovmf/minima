@@ -427,6 +427,8 @@ extern "C" {
    */
   size_t x_fs_path_join_(XFSPath* path, ...);
 
+  size_t x_fs_path_join_slice_(XFSPath* path, ...);
+
   /**
    * @brief Compute a relative path from one C-string path to another.
    * @param from_path Base path.

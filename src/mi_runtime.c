@@ -41,7 +41,7 @@ static void s_scope_init(MiScopeFrame* f, size_t chunk_size, MiScopeFrame* paren
   f->next_free = NULL;
 }
 
-static MiRtVar* s_var_find_in_frame(const MiScopeFrame* frame, XSlice name)
+static MiRtVar* s_var_find_in_frame_id(const MiScopeFrame* frame, uint32_t sym_id)
 {
   if (!frame)
   {
@@ -51,7 +51,7 @@ static MiRtVar* s_var_find_in_frame(const MiScopeFrame* frame, XSlice name)
   MiRtVar* it = frame->vars;
   while (it)
   {
-    if (x_slice_eq(it->name, name))
+    if (it->sym_id == sym_id)
     {
       return it;
     }
@@ -132,7 +132,10 @@ static void s_value_pre_destroy(MiRuntime* rt, MiRtValue v)
   else if (v.kind == MI_RT_VAL_CMD && v.as.cmd)
   {
     MiRtCmd* c = v.as.cmd;
-    mi_rt_value_release(rt, c->body);
+    if (!c->is_native)
+    {
+      mi_rt_value_release(rt, c->body);
+    }
     if (c->param_names)
     {
       mi_heap_release_payload(&rt->heap, c->param_names);
@@ -161,6 +164,7 @@ void mi_rt_init(MiRuntime* rt)
     exit(1);
   }
 
+  rt->root.rt = rt;
   rt->root.arena = x_arena_create(64u * 1024u);
   if (!rt->root.arena)
   {
@@ -179,32 +183,27 @@ void mi_rt_init(MiRuntime* rt)
   rt->command_capacity = 0u;
 
   rt->exec_block = NULL;
+
+
+  rt->sym_names = NULL;
+  rt->sym_count = 0u;
+  rt->sym_capacity = 0u;
 }
 
 void mi_rt_shutdown(MiRuntime* rt)
 {
-  size_t i;
-
   if (!rt)
   {
     return;
   }
 
+  /* Pop all scopes down to root, releasing values. */
   while (rt->current && rt->current != &rt->root)
   {
     mi_rt_scope_pop(rt);
   }
 
-  while (rt->free_frames)
-  {
-    MiScopeFrame* f = rt->free_frames;
-    rt->free_frames = f->next_free;
-
-    x_arena_destroy(f->arena);
-    free(f);
-  }
-
-  /* Release values stored in the root frame before destroying the heap. */
+  /* Release all values stored in the root scope. */
   {
     MiRtVar* it = rt->root.vars;
     while (it)
@@ -212,42 +211,56 @@ void mi_rt_shutdown(MiRuntime* rt)
       mi_rt_value_release(rt, it->value);
       it = it->next;
     }
+    rt->root.vars = NULL;
   }
 
-  /*
-   * NOTE: We clear runtime pointers *before* shutting down the heap.
-   * If the heap shutdown triggers allocator diagnostics / heap validation on
-   * some platforms, touching the runtime struct after that can trip crashes
-   * when earlier corruption is present. Clearing first makes shutdown robust
-   * and keeps the runtime in a known state even if shutdown aborts early.
-   */
-  XArena* root_arena = rt->root.arena;
-  rt->root.arena = NULL;
-  rt->root.vars = NULL;
-  rt->root.parent = NULL;
-  rt->current = NULL;
+  /* Destroy cached/free frames. Values were released on pop, so just free arenas. */
+  while (rt->free_frames)
+  {
+    MiScopeFrame* f = rt->free_frames;
+    rt->free_frames = f->next_free;
+    f->next_free = NULL;
+    if (f->arena)
+    {
+      x_arena_destroy(f->arena);
+      f->arena = NULL;
+    }
+    free(f);
+  }
 
-  x_arena_destroy(root_arena);
-
-  mi_heap_shutdown(&rt->heap);
-
+  /* Release user commands array (names are interned via heap and released below). */
   if (rt->commands)
   {
-    for (i = 0u; i < rt->command_count; ++i)
-    {
-      if (rt->commands[i].name.ptr)
-      {
-        free((void*)rt->commands[i].name.ptr);
-      }
-    }
     free(rt->commands);
+    rt->commands = NULL;
   }
-
-  rt->commands = NULL;
   rt->command_count = 0u;
   rt->command_capacity = 0u;
-  rt->exec_block = NULL;
+
+  /* Release interned symbol names. */
+  if (rt->sym_names)
+  {
+    for (size_t i = 0u; i < rt->sym_count; ++i)
+    {
+      mi_heap_release_payload(&rt->heap, (void*)rt->sym_names[i].ptr);
+    }
+    free(rt->sym_names);
+    rt->sym_names = NULL;
+  }
+  rt->sym_count = 0u;
+  rt->sym_capacity = 0u;
+
+  /* Destroy root arena last (it owns scope vars allocations). */
+  if (rt->root.arena)
+  {
+    x_arena_destroy(rt->root.arena);
+    rt->root.arena = NULL;
+  }
+
+  rt->current = &rt->root;
+  mi_heap_shutdown(&rt->heap);
 }
+
 
 MiHeapStats mi_rt_heap_stats(const MiRuntime* rt)
 {
@@ -258,6 +271,63 @@ MiHeapStats mi_rt_heap_stats(const MiRuntime* rt)
     return s;
   }
   return mi_heap_stats(&rt->heap);
+}
+
+uint32_t mi_rt_sym_intern(MiRuntime* rt, XSlice name)
+{
+  if (!rt)
+  {
+    return 0u;
+  }
+
+  for (size_t i = 0u; i < rt->sym_count; ++i)
+  {
+    if (x_slice_eq(rt->sym_names[i], name))
+    {
+      return (uint32_t)i;
+    }
+  }
+
+  if (rt->sym_count == rt->sym_capacity)
+  {
+    size_t new_cap = (rt->sym_capacity == 0u) ? 64u : (rt->sym_capacity * 2u);
+    XSlice* new_names = (XSlice*)realloc(rt->sym_names, new_cap * sizeof(XSlice));
+    if (!new_names)
+    {
+      return 0u;
+    }
+    rt->sym_names = new_names;
+    rt->sym_capacity = new_cap;
+  }
+
+  size_t alloc_size = name.length + 1u;
+  char* copy = (char*)mi_heap_alloc_buffer(&rt->heap, alloc_size);
+  if (!copy)
+  {
+    return 0u;
+  }
+  if (name.ptr && name.length)
+  {
+    memcpy(copy, name.ptr, name.length);
+  }
+  copy[name.length] = '\0';
+
+  rt->sym_names[rt->sym_count] = x_slice_init(copy, name.length);
+  rt->sym_count++;
+  return (uint32_t)(rt->sym_count - 1u);
+}
+
+XSlice mi_rt_sym_name(const MiRuntime* rt, uint32_t sym_id)
+{
+  if (!rt)
+  {
+    return x_slice_empty();
+  }
+  if ((size_t)sym_id >= rt->sym_count)
+  {
+    return x_slice_empty();
+  }
+  return rt->sym_names[sym_id];
 }
 
 void mi_rt_value_retain(MiRuntime* rt, MiRtValue v)
@@ -337,6 +407,7 @@ void mi_rt_scope_push_with_parent(MiRuntime* rt, MiScopeFrame* parent)
     f = rt->free_frames;
     rt->free_frames = f->next_free;
     f->next_free = NULL;
+    f->rt = rt;
     f->parent = parent;
     x_arena_reset(f->arena);
     f->vars = NULL;
@@ -345,6 +416,7 @@ void mi_rt_scope_push_with_parent(MiRuntime* rt, MiScopeFrame* parent)
   {
     f = (MiScopeFrame*)s_realloc(NULL, sizeof(MiScopeFrame));
     s_scope_init(f, rt->scope_chunk_size, parent);
+    f->rt = rt;
   }
 
   rt->current = f;
@@ -359,6 +431,7 @@ MiScopeFrame* mi_rt_scope_create_detached(MiRuntime* rt, MiScopeFrame* parent)
 
   MiScopeFrame* f = (MiScopeFrame*)s_realloc(NULL, sizeof(MiScopeFrame));
   s_scope_init(f, rt->scope_chunk_size, parent);
+  f->rt = rt;
   return f;
 }
 
@@ -404,6 +477,145 @@ void mi_rt_scope_pop(MiRuntime* rt)
   rt->free_frames = dead;
 }
 
+bool mi_rt_var_get_id(MiRuntime* rt, uint32_t sym_id, MiRtValue* out_value)
+{
+  if (!rt)
+  {
+    return false;
+  }
+
+  MiScopeFrame* f = rt->current;
+  while (f)
+  {
+    MiRtVar* v = s_var_find_in_frame_id(f, sym_id);
+    if (v)
+    {
+      if (out_value)
+      {
+        *out_value = v->value;
+      }
+      return true;
+    }
+    f = f->parent;
+  }
+
+  return false;
+}
+
+bool mi_rt_var_get_from_id(MiScopeFrame* start, uint32_t sym_id, MiRtValue* out_value)
+{
+  MiScopeFrame* f = start;
+  while (f)
+  {
+    MiRtVar* v = s_var_find_in_frame_id(f, sym_id);
+    if (v)
+    {
+      if (out_value)
+      {
+        *out_value = v->value;
+      }
+      return true;
+    }
+    f = f->parent;
+  }
+  return false;
+}
+
+void mi_rt_var_set_from_id(MiScopeFrame* start, uint32_t sym_id, MiRtValue value)
+{
+  if (!start)
+  {
+    return;
+  }
+
+  MiRuntime* rt = start->rt;
+  MiScopeFrame* f = start;
+  while (f)
+  {
+    MiRtVar* v = s_var_find_in_frame_id(f, sym_id);
+    if (v)
+    {
+      mi_rt_value_assign(rt, &v->value, value);
+      return;
+    }
+    f = f->parent;
+  }
+
+  MiRtVar* v = (MiRtVar*)x_arena_alloc(start->arena, sizeof(MiRtVar));
+  if (!v)
+  {
+    mi_error("mi_runtime: out of memory");
+    exit(1);
+  }
+
+  v->sym_id = sym_id;
+  v->value = mi_rt_make_void();
+  mi_rt_value_assign(rt, &v->value, value);
+  v->next = start->vars;
+  start->vars = v;
+}
+
+void mi_rt_var_set_id(MiRuntime* rt, uint32_t sym_id, MiRtValue value)
+{
+  if (!rt || !rt->current)
+  {
+    return;
+  }
+
+  MiScopeFrame* f = rt->current;
+  while (f)
+  {
+    MiRtVar* v = s_var_find_in_frame_id(f, sym_id);
+    if (v)
+    {
+      mi_rt_value_assign(rt, &v->value, value);
+      return;
+    }
+    f = f->parent;
+  }
+
+  MiRtVar* v = (MiRtVar*)x_arena_alloc(rt->current->arena, sizeof(MiRtVar));
+  if (!v)
+  {
+    mi_error("mi_runtime: out of memory");
+    exit(1);
+  }
+
+  v->sym_id = sym_id;
+  v->value = mi_rt_make_void();
+  mi_rt_value_assign(rt, &v->value, value);
+  v->next = rt->current->vars;
+  rt->current->vars = v;
+}
+
+void mi_rt_var_define_id(MiRuntime* rt, uint32_t sym_id, MiRtValue value)
+{
+  if (!rt || !rt->current)
+  {
+    return;
+  }
+
+  MiRtVar* v = s_var_find_in_frame_id(rt->current, sym_id);
+  if (v)
+  {
+    mi_rt_value_assign(rt, &v->value, value);
+    return;
+  }
+
+  v = (MiRtVar*)x_arena_alloc(rt->current->arena, sizeof(MiRtVar));
+  if (!v)
+  {
+    mi_error("mi_runtime: out of memory");
+    exit(1);
+  }
+
+  v->sym_id = sym_id;
+  v->value = mi_rt_make_void();
+  mi_rt_value_assign(rt, &v->value, value);
+  v->next = rt->current->vars;
+  rt->current->vars = v;
+}
+
 bool mi_rt_var_get(const MiRuntime* rt, XSlice name, MiRtValue* out_value)
 {
   if (!rt)
@@ -411,105 +623,42 @@ bool mi_rt_var_get(const MiRuntime* rt, XSlice name, MiRtValue* out_value)
     return false;
   }
 
-  const MiScopeFrame* f = rt->current;
-  while (f)
-  {
-    MiRtVar* v = s_var_find_in_frame(f, name);
-    if (v)
-    {
-      if (out_value)
-      {
-        *out_value = v->value;
-      }
-      return true;
-    }
-    f = f->parent;
-  }
-
-  return false;
+  uint32_t sym_id = mi_rt_sym_intern((MiRuntime*)rt, name);
+  return mi_rt_var_get_id((MiRuntime*)rt, sym_id, out_value);
 }
 
 bool mi_rt_var_get_from(const MiScopeFrame* start, XSlice name, MiRtValue* out_value)
 {
-  const MiScopeFrame* f = start;
-  while (f)
-  {
-    MiRtVar* v = s_var_find_in_frame(f, name);
-    if (v)
-    {
-      if (out_value)
-      {
-        *out_value = v->value;
-      }
-      return true;
-    }
-    f = f->parent;
-  }
-  return false;
-}
-
-bool mi_rt_var_set(MiRuntime* rt, XSlice name, MiRtValue value)
-{
-  if (!rt || !rt->current)
+  if (!start || !start->rt)
   {
     return false;
   }
 
-  // Update nearest existing.
-  MiScopeFrame* f = rt->current;
-  while (f)
+  uint32_t sym_id = mi_rt_sym_intern(start->rt, name);
+  return mi_rt_var_get_from_id((MiScopeFrame*)start, sym_id, out_value);
+}
+
+bool mi_rt_var_set(MiRuntime* rt, XSlice name, MiRtValue value)
+{
+  if (!rt)
   {
-    MiRtVar* v = s_var_find_in_frame(f, name);
-    if (v)
-    {
-      mi_rt_value_assign(rt, &v->value, value);
-      return true;
-    }
-    f = f->parent;
+    return false;
   }
 
-  // Insert in current.
-  MiRtVar* v = (MiRtVar*)x_arena_alloc(rt->current->arena, sizeof(MiRtVar));
-  if (!v)
-  {
-    mi_error("mi_runtime: out of memory\n");
-    exit(1);
-  }
-
-  v->name = name;
-  v->value = mi_rt_make_void();
-  mi_rt_value_assign(rt, &v->value, value);
-  v->next = rt->current->vars;
-  rt->current->vars = v;
+  uint32_t sym_id = mi_rt_sym_intern(rt, name);
+  mi_rt_var_set_id(rt, sym_id, value);
   return true;
 }
 
 bool mi_rt_var_define(MiRuntime* rt, XSlice name, MiRtValue value)
 {
-  if (!rt || !rt->current)
+  if (!rt)
   {
     return false;
   }
 
-  MiRtVar* v = s_var_find_in_frame(rt->current, name);
-  if (v)
-  {
-    mi_rt_value_assign(rt, &v->value, value);
-    return true;
-  }
-
-  v = (MiRtVar*)x_arena_alloc(rt->current->arena, sizeof(MiRtVar));
-  if (!v)
-  {
-    mi_error("mi_runtime: out of memory\n");
-    exit(1);
-  }
-
-  v->name = name;
-  v->value = mi_rt_make_void();
-  mi_rt_value_assign(rt, &v->value, value);
-  v->next = rt->current->vars;
-  rt->current->vars = v;
+  uint32_t sym_id = mi_rt_sym_intern(rt, name);
+  mi_rt_var_define_id(rt, sym_id, value);
   return true;
 }
 
@@ -972,9 +1121,11 @@ MiRtCmd* mi_rt_cmd_create(MiRuntime* rt, uint32_t param_count, const XSlice* par
   }
 
   memset(c, 0, sizeof(*c));
+  c->is_native = false;
   c->param_count = param_count;
   c->param_names = NULL;
   c->body = mi_rt_make_void();
+  c->native_fn = NULL;
 
   if (param_count > 0u)
   {
@@ -992,6 +1143,29 @@ MiRtCmd* mi_rt_cmd_create(MiRuntime* rt, uint32_t param_count, const XSlice* par
   }
 
   mi_rt_value_assign(rt, &c->body, body);
+  return c;
+}
+
+MiRtCmd* mi_rt_cmd_create_native(MiRuntime* rt, MiRtNativeFn native_fn)
+{
+  if (!rt || !native_fn)
+  {
+    return NULL;
+  }
+
+  MiRtCmd* c = (MiRtCmd*)mi_heap_alloc_obj(&rt->heap, MI_OBJ_CMD, sizeof(MiRtCmd));
+  if (!c)
+  {
+    mi_error("mi_runtime: out of memory\n");
+    exit(1);
+  }
+
+  memset(c, 0, sizeof(*c));
+  c->is_native = true;
+  c->param_count = 0u;
+  c->param_names = NULL;
+  c->body = mi_rt_make_void();
+  c->native_fn = native_fn;
   return c;
 }
 

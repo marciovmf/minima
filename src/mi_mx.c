@@ -15,7 +15,7 @@
 #define MI_MX_MAGIC_2 'X'
 #define MI_MX_MAGIC_3 '>'
 
-#define MI_MX_VERSION 2u
+/* MI_MX_VERSION defined in mi_mx.h */
 
 typedef struct MiMixHeader
 {
@@ -24,6 +24,36 @@ typedef struct MiMixHeader
   uint32_t chunk_count;
   uint32_t entry_chunk_index;
 } MiMixHeader;
+
+bool mi_mx_peek_file_version(const char* filename, uint32_t* out_version)
+{
+  if (!filename || !out_version)
+  {
+    return false;
+  }
+
+  FILE* f = fopen(filename, "rb");
+  if (!f)
+  {
+    return false;
+  }
+
+  MiMixHeader h;
+  bool ok = fread(&h, sizeof(h), 1, f) == 1;
+  fclose(f);
+  if (!ok)
+  {
+    return false;
+  }
+
+  if (h.magic[0] != MI_MX_MAGIC_0 || h.magic[1] != MI_MX_MAGIC_1 || h.magic[2] != MI_MX_MAGIC_2 || h.magic[3] != MI_MX_MAGIC_3)
+  {
+    return false;
+  }
+
+  *out_version = h.version;
+  return true;
+}
 
 typedef enum MiMixConstKind
 {
@@ -790,7 +820,7 @@ bool mi_mx_load_file(MiVm* vm, const char* filename, MiMixProgram* out_program)
     fclose(f);
     return false;
   }
-  if (h.version < 1u || h.version > MI_MX_VERSION)
+  if (h.version != MI_MX_VERSION)
   {
     fclose(f);
     return false;

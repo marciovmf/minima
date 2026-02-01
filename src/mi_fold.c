@@ -108,6 +108,22 @@ static MiRtValue s_eval_binary_numeric(MiTokenKind op, const MiRtValue* a, const
   }
 }
 
+static MiRtValue s_eval_binary_void(MiTokenKind op, const MiRtValue* a, const MiRtValue* b)
+{
+  bool same_kind = a->kind == b->kind;
+  bool both_void = same_kind && a->kind == MI_RT_VAL_VOID;
+  switch(op)
+  {
+    case MI_TOK_EQEQ:
+      return mi_rt_make_bool(both_void);
+    case MI_TOK_BANGEQ:
+      return mi_rt_make_bool(!both_void);
+    default:
+      mi_error("unsupported numeric binary operator\n");
+      return mi_rt_make_void();
+  }
+}
+
 static MiRtValue mi_eval_expr_ast(MiRuntime* rt, const MiExpr* expr)
 {
   if (!expr)
@@ -267,8 +283,8 @@ static MiRtValue mi_eval_expr_ast(MiRuntime* rt, const MiExpr* expr)
         MiRtValue right = mi_eval_expr_ast(rt, expr->as.binary.right);
 
         // voids are equal
-        if (left.kind == MI_RT_VAL_VOID && right.kind == MI_RT_VAL_VOID)
-          return mi_rt_make_bool(true);
+        if (left.kind == MI_RT_VAL_VOID || right.kind == MI_RT_VAL_VOID)
+          return s_eval_binary_void(op, &left, &right);
 
         if (left.kind == MI_RT_VAL_STRING && right.kind == MI_RT_VAL_STRING)
         {

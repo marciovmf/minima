@@ -27,10 +27,10 @@ static void s_usage(const char* exe)
 {
   mi_error_fmt(
       "Usage:\n"
-      "  %s -c <file.min> [out.mx]   Compile only (default out = file.min.mx)\n"
-      "  %s -d <file.mx>             Disassemble MIX file\n"
-      "  %s <file.min>               Compile and run\n"
-      "  %s <file.mx>                Run MIX file\n",
+      "  %s [--cache-dir <dir>] -c <file.min> [out.mx]   Compile only (default out = file.min.mx)\n"
+      "  %s [--cache-dir <dir>] -d <file.mx>             Disassemble MIX file\n"
+      "  %s [--cache-dir <dir>] <file.min>               Compile and run\n"
+      "  %s [--cache-dir <dir>] <file.mx>                Run MIX file\n",
       exe, exe, exe, exe);
 }
 
@@ -49,7 +49,7 @@ static bool s_has_ext(const char* path, const char* ext)
 // Actions
 //----------------------------------------------------------
 
-static int s_cmd_compile_only(const char* in_file, const char* out_file)
+static int s_cmd_compile_only(const char* in_file, const char* out_file, const char* cache_dir)
 {
   size_t src_len = 0;
   char* src = x_io_read_text(in_file, &src_len);
@@ -66,6 +66,7 @@ static int s_cmd_compile_only(const char* in_file, const char* out_file)
 
   MiVm vm;
   mi_vm_init(&vm, &rt);
+  mi_vm_set_cache_dir(&vm, cache_dir);
 
   XArena* arena = x_arena_create(1024 * 64);
   if (!arena)
@@ -80,11 +81,7 @@ static int s_cmd_compile_only(const char* in_file, const char* out_file)
   MiParseResult res = mi_parse_program_ex(source.ptr, source.length, arena, true);
   if (!res.ok || !res.script)
   {
-    mi_error_fmt("Parse error %d,%d - %.*s\n",
-        res.error_line,
-        res.error_column,
-        (int)res.error_message.length,
-        res.error_message.ptr);
+    mi_parse_print_error(source, &res);
     x_arena_destroy(arena);
     mi_vm_shutdown(&vm);
     mi_rt_shutdown(&rt);
@@ -120,13 +117,14 @@ static int s_cmd_compile_only(const char* in_file, const char* out_file)
   return 0;
 }
 
-static int s_cmd_disasm(const char* mx_file)
+static int s_cmd_disasm(const char* mx_file, const char* cache_dir)
 {
   MiRuntime rt;
   mi_rt_init(&rt);
 
   MiVm vm;
   mi_vm_init(&vm, &rt);
+  mi_vm_set_cache_dir(&vm, cache_dir);
 
   MiMixProgram p;
   if (!mi_mx_load_file(&vm, mx_file, &p))
@@ -145,7 +143,7 @@ static int s_cmd_disasm(const char* mx_file)
   return 0;
 }
 
-static int s_cmd_run_source(const char* mi_file)
+static int s_cmd_run_source(const char* mi_file, const char* cache_dir)
 {
   size_t src_len = 0;
   char* src = x_io_read_text(mi_file, &src_len);
@@ -161,6 +159,7 @@ static int s_cmd_run_source(const char* mi_file)
 
   MiVm vm;
   mi_vm_init(&vm, &rt);
+  mi_vm_set_cache_dir(&vm, cache_dir);
 
   XArena* arena = x_arena_create(1024 * 64);
   if (!arena)
@@ -175,11 +174,7 @@ static int s_cmd_run_source(const char* mi_file)
   MiParseResult res = mi_parse_program_ex(source.ptr, source.length, arena, true);
   if (!res.ok || !res.script)
   {
-    mi_error_fmt("Parse error %d,%d - %.*s\n",
-        res.error_line,
-        res.error_column,
-        (int)res.error_message.length,
-        res.error_message.ptr);
+    mi_parse_print_error(source, &res);
     x_arena_destroy(arena);
     mi_vm_shutdown(&vm);
     mi_rt_shutdown(&rt);
@@ -211,13 +206,14 @@ static int s_cmd_run_source(const char* mi_file)
   return 0;
 }
 
-static int s_cmd_run_mix(const char* mx_file)
+static int s_cmd_run_mix(const char* mx_file, const char* cache_dir)
 {
   MiRuntime rt;
   mi_rt_init(&rt);
 
   MiVm vm;
   mi_vm_init(&vm, &rt);
+  mi_vm_set_cache_dir(&vm, cache_dir);
 
   MiMixProgram p;
   if (!mi_mx_load_file(&vm, mx_file, &p))
@@ -248,21 +244,37 @@ int main(int argc, char** argv)
     return 1;
   }
 
-  // Compile only
-  if (strcmp(argv[1], "-c") == 0)
+  const char* cache_dir = NULL;
+  int argi = 1;
+  if (argi + 2 <= argc && strcmp(argv[argi], "--cache-dir") == 0)
   {
-    if (argc != 3 && argc != 4)
+    cache_dir = argv[argi + 1];
+    argi += 2;
+  }
+
+  int rem = argc - argi;
+  char** args = &argv[argi];
+  if (rem < 1)
+  {
+    s_usage(argv[0]);
+    return 1;
+  }
+
+  // Compile only
+  if (strcmp(args[0], "-c") == 0)
+  {
+    if (rem != 2 && rem != 3)
     {
       s_usage(argv[0]);
       return 1;
     }
 
-    const char* in_file = argv[2];
+    const char* in_file = args[1];
     XFSPath out_file;
 
-    if (argc == 4)
+    if (rem == 3)
     {
-      x_fs_path(&out_file, argv[3]);
+      x_fs_path(&out_file, args[2]);
     }
     else
     {
@@ -270,30 +282,30 @@ int main(int argc, char** argv)
       x_fs_path_change_extension(&out_file, ".mx");
     }
 
-    int r = s_cmd_compile_only(in_file, out_file.buf);
+    int r = s_cmd_compile_only(in_file, out_file.buf, cache_dir);
     return r;
   }
 
   // Disassemble
-  if (strcmp(argv[1], "-d") == 0)
+  if (strcmp(args[0], "-d") == 0)
   {
-    if (argc != 3)
+    if (rem != 2)
     {
       s_usage(argv[0]);
       return 1;
     }
-    return s_cmd_disasm(argv[2]);
+    return s_cmd_disasm(args[1], cache_dir);
   }
 
   // Single arg: compile+run or run MIX
-  if (argc == 2)
+  if (rem == 1)
   {
-    const char* path = argv[1];
+    const char* path = args[0];
     if (s_has_ext(path, ".mx"))
     {
-      return s_cmd_run_mix(path);
+      return s_cmd_run_mix(path, cache_dir);
     }
-    return s_cmd_run_source(path);
+    return s_cmd_run_source(path, cache_dir);
   }
 
   s_usage(argv[0]);
