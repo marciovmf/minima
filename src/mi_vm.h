@@ -42,10 +42,11 @@ typedef struct MiVmCallFrame
 //----------------------------------------------------------
 
 
-/* VM command entrypoint.
-   - name is the invoked command name (useful for user-defined commands).
-   - argv does NOT include the command name; it's only the arguments.
-*/
+/**
+ * VM command entrypoint.
+ * - name is the invoked command name (useful for user-defined commands).
+ * - argv does NOT include the command name; it's only the arguments.
+ */
 typedef MiRtValue (*MiVmCommandFn)(MiVm* vm, XSlice name, int argc, const MiRtValue* argv);
 
 typedef struct MiVmCommandEntry
@@ -76,10 +77,10 @@ typedef enum MiVmOp
   MI_VM_OP_LOAD_CONST,  // a = const[imm]
   MI_VM_OP_LOAD_BLOCK,  // a = new block from subchunk[imm] (captures env)
   MI_VM_OP_MOV,         // a = b
-  // Lists
+                        // Lists
   MI_VM_OP_LIST_NEW,    // a = new list
   MI_VM_OP_LIST_PUSH,   // regs[a].list push regs[b]
-  // Dicts
+                        // Dicts
   MI_VM_OP_DICT_NEW,    // a = new dict
 
   /* Iteration (cursor-based, no heap iterator objects)
@@ -88,7 +89,7 @@ typedef enum MiVmOp
      - imm low 8 bits contains dst_item register
      - For lists: item = list[cursor]
      - For dicts: item = KVREF (virtual 2-elem view)
-  */
+     */
   MI_VM_OP_ITER_NEXT,
   // Indexing
   MI_VM_OP_INDEX,       // a = regs[b][regs[c]]
@@ -116,10 +117,7 @@ typedef enum MiVmOp
   /* Qualified member load: a = regs[b].env[$sym[imm]]
      regs[b] must be a VM chunk/module block (MI_RT_VAL_BLOCK with env). */
   MI_VM_OP_LOAD_MEMBER,
-  /* Qualified member store: regs[b].env[$sym[imm]] = regs[a]
-     regs[b] must be a VM chunk/module block (MI_RT_VAL_BLOCK with env).
-     Assignment uses the same "search up then create" semantics as set:. */
-  MI_VM_OP_STORE_MEMBER,
+  MI_VM_OP_STORE_MEMBER,       // regs[b].env[$sym[imm]] = regs[a]
   MI_VM_OP_STORE_VAR,         // $sym[imm] = a
   MI_VM_OP_DEFINE_VAR,        // define $sym[imm] = a in current scope only
   MI_VM_OP_LOAD_INDIRECT_VAR, // a = $( regs[b] )
@@ -135,10 +133,10 @@ typedef enum MiVmOp
   MI_VM_OP_CALL_CMD_DYN,      // a = call by name in regs[b], argc=c
 
   MI_VM_OP_CALL_BLOCK,        // a = call regs[b] (block) with argc=c
-  // Scopes (VM-only; used by compiler for inlined control flow)
+                              // Scopes (VM-only; used by compiler for inlined control flow)
   MI_VM_OP_SCOPE_PUSH,        // push a new scope frame (parent = current)
   MI_VM_OP_SCOPE_POP,         // pop current scope frame
-  // Control
+                              // Control
   MI_VM_OP_JUMP,
   MI_VM_OP_JUMP_IF_TRUE,
   MI_VM_OP_JUMP_IF_FALSE,
@@ -185,12 +183,12 @@ struct MiVmChunk
   size_t         subchunk_capacity;
 
 
-// Debug source mapping (optional; may be NULL for chunks loaded without debug info)
-XSlice     dbg_name;        // e.g. function name, "<script>", "<block>"
-XSlice     dbg_file;        // e.g. filename or module name
-uint32_t*  dbg_lines;       // per-instruction line number (1-based); 0 if unknown
-uint32_t*  dbg_cols;        // per-instruction column (1-based); 0 if unknown
-size_t     dbg_capacity;    // capacity of dbg_* arrays (tracks code_capacity)
+  // Debug source mapping (optional; may be NULL for chunks loaded without debug info)
+  XSlice     dbg_name;        // e.g. function name, "<script>", "<block>"
+  XSlice     dbg_file;        // e.g. filename or module name
+  uint32_t*  dbg_lines;       // per-instruction line number (1-based); 0 if unknown
+  uint32_t*  dbg_cols;        // per-instruction column (1-based); 0 if unknown
+  size_t     dbg_capacity;    // capacity of dbg_* arrays (tracks code_capacity)
 };
 struct MiVm
 {
@@ -198,7 +196,7 @@ struct MiVm
 
   /* Module cache directory for include:.
      If cache_dir_set is false, include: selects a platform default.
-  */
+     */
   XFSPath cache_dir;
   bool    cache_dir_set;
 
@@ -244,25 +242,35 @@ struct MiVm
 void      mi_vm_init(MiVm* vm, MiRuntime* rt);
 void      mi_vm_shutdown(MiVm* vm);
 
-/* Configure where include: should store compiled .mx cache entries.
-   If path is NULL or empty, include: uses a platform default. */
+/**
+ * Configure where include: should store compiled .mx cache entries.
+ * If path is NULL or empty, include: uses a platform default.
+ */
 void      mi_vm_set_cache_dir(MiVm* vm, const char* path);
 
+/**
+ * Register a VM command (this is separate from mi_rt_register_command).
+ */
 bool      mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn);
 
-/* Find a registered command by name. Returns NULL if not found. */
+/**
+ * Find a registered command by name. Returns NULL if not found.
+ */
 MiVmCommandFn mi_vm_find_command_fn(MiVm* vm, XSlice name);
 
-/* Register a VM command (this is separate from mi_rt_register_command). */
 
 /* Compile a script to bytecode chunk using the provided arena for allocations. */
 /* Destroy a compiled chunk (frees heap allocations). */
 void      mi_vm_chunk_destroy(MiVmChunk* chunk);
 
-/* Execute a compiled chunk. Returns last command value. */
+/**
+ * Execute a compiled chunk. Returns last command value.
+ */
 MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk);
 
-/* Debug: pretty-print bytecode to stdout. */
+/**
+ * Debug: pretty-print bytecode to stdout.
+ */
 void      mi_vm_disasm(const MiVmChunk* chunk);
 
 #endif // MI_VM_H

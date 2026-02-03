@@ -626,27 +626,28 @@ Falls back to regular command dispatch for indirect names. */
       return dst;
     }
 
-    /* lvalue: $target[index] */
+    
+/* lvalue: target::member */
+if (lvalue->kind == MI_EXPR_QUAL)
+{
+  uint8_t base_reg = s_compile_expr(b, lvalue->as.qual.target);
+  uint8_t rhs_reg = s_compile_expr(b, rhs);
+  int32_t sym = s_chunk_add_symbol(b->chunk, lvalue->as.qual.member);
+  s_emit(b, MI_VM_OP_STORE_MEMBER, rhs_reg, base_reg, 0, sym);
+  if (wants_result)
+  {
+    s_emit(b, MI_VM_OP_MOV, dst, rhs_reg, 0, 0);
+  }
+  return dst;
+}
+
+/* lvalue: $target[index] */
     if (lvalue->kind == MI_EXPR_INDEX)
     {
       uint8_t base_reg = s_compile_expr(b, lvalue->as.index.target);
       uint8_t key_reg = s_compile_expr(b, lvalue->as.index.index);
       uint8_t rhs_reg = s_compile_expr(b, rhs);
       s_emit(b, MI_VM_OP_STORE_INDEX, base_reg, key_reg, rhs_reg, 0);
-      if (wants_result)
-      {
-        s_emit(b, MI_VM_OP_MOV, dst, rhs_reg, 0, 0);
-      }
-      return dst;
-    }
-
-    /* lvalue: target::member */
-    if (lvalue->kind == MI_EXPR_QUAL)
-    {
-      uint8_t base_reg = s_compile_expr(b, lvalue->as.qual.target);
-      uint8_t rhs_reg = s_compile_expr(b, rhs);
-      int32_t sym = s_chunk_add_symbol(b->chunk, lvalue->as.qual.member);
-      s_emit(b, MI_VM_OP_STORE_MEMBER, rhs_reg, base_reg, 0, sym);
       if (wants_result)
       {
         s_emit(b, MI_VM_OP_MOV, dst, rhs_reg, 0, 0);

@@ -22,6 +22,9 @@ set(STDX_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/src/include")
 
 list(APPEND SOURCES 
   ${CMAKE_CURRENT_LIST_DIR}/src/main.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_cli.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_cli.h
+  ${CMAKE_CURRENT_LIST_DIR}/src/mi_version.h
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_compile.c
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_compile.h
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_typecheck.c

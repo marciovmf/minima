@@ -15,10 +15,10 @@ typedef struct MiScript MiScript;
 MiVmChunk* mi_compile_vm_script(MiVm* vm, const MiScript* script);
 
 /* Compile with debug name/file attached to the resulting chunk.
-   - dbg_name is shown in disassembly/trace (e.g. "<script>", "<block>").
-   - dbg_file should be the source filename (or module name).
-   Pass empty slices to omit.
-*/
+ * - dbg_name is shown in disassembly/trace (e.g. "<script>", "<block>").
+ * - dbg_file should be the source filename (or module name).
+ * Pass empty slices to omit.
+ */
 MiVmChunk* mi_compile_vm_script_ex(MiVm* vm, const MiScript* script, XSlice dbg_name, XSlice dbg_file);
 
 #endif // MI_COMPILE_H

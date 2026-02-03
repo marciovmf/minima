@@ -224,6 +224,8 @@ static void s_vm_report_error(MiVm* vm, const char* msg)
     s_vm_print_source_context_from_file(file, line, col);
   }
 }
+
+
 //----------------------------------------------------------
 // Internal helpers
 //----------------------------------------------------------
@@ -306,11 +308,6 @@ static bool s_slice_eq(const XSlice a, const XSlice b)
   }
   return memcmp(a.ptr, b.ptr, a.length) == 0;
 }
-
-/* Note: the idea is to keep compilation maps as simple linear scans, 
- * avoiding pulling in hash table machinery during early bring-up.
- * Once the instruction set stabilizes, maybe I'll switch to stdx_hashtable.
- */
 
 //----------------------------------------------------------
 // VM builtins (minimal starter set)
@@ -1568,7 +1565,7 @@ static MiRtValue s_vm_cmd_include(MiVm* vm, XSlice name, int argc, const MiRtVal
   x_fs_path_set(&req, "");
   {
     XFSPath mod;
-    x_fs_path_set(&mod, (const char*)module.ptr);
+    x_fs_path_set_slice(&mod, module);
 
     if (x_fs_path_is_absolute_cstr(mod.buf))
     {
@@ -1656,7 +1653,7 @@ static MiRtValue s_vm_cmd_include(MiVm* vm, XSlice name, int argc, const MiRtVal
   {
     uint32_t mx_version = 0;
     bool have_ver = mi_mx_peek_file_version(load_mx.buf, &mx_version);
-    bool compatible = have_ver && (mx_version == MI_MX_VERSION);
+    bool compatible = have_ver && (mx_version >= 1u) && (mx_version <= MI_MX_VERSION);
 
     if (!compatible && x_fs_path_exists(&src_mi))
     {
@@ -1915,6 +1912,7 @@ MiVmCommandFn mi_vm_find_command_fn(MiVm* vm, XSlice name)
   return NULL;
 }
 
+
 //----------------------------------------------------------
 // Chunk helpers
 //----------------------------------------------------------
@@ -2006,22 +2004,22 @@ static void s_vm_chunk_destroy_ex(MiVmChunk* chunk, MiVmChunk** stack, size_t de
     free(chunk->cmd_names);
   }
 
-if (chunk->dbg_lines)
-{
-  free(chunk->dbg_lines);
-}
-if (chunk->dbg_cols)
-{
-  free(chunk->dbg_cols);
-}
-if (chunk->dbg_name.ptr)
-{
-  free((void*)chunk->dbg_name.ptr);
-}
-if (chunk->dbg_file.ptr)
-{
-  free((void*)chunk->dbg_file.ptr);
-}
+  if (chunk->dbg_lines)
+  {
+    free(chunk->dbg_lines);
+  }
+  if (chunk->dbg_cols)
+  {
+    free(chunk->dbg_cols);
+  }
+  if (chunk->dbg_name.ptr)
+  {
+    free((void*)chunk->dbg_name.ptr);
+  }
+  if (chunk->dbg_file.ptr)
+  {
+    free((void*)chunk->dbg_file.ptr);
+  }
 
   free(chunk);
 }
@@ -2031,9 +2029,10 @@ void mi_vm_chunk_destroy(MiVmChunk* chunk)
   s_vm_chunk_destroy_ex(chunk, NULL, 0);
 }
 
+
+//----------------------------------------------------------
 // Execution
 //----------------------------------------------------------
-
 
 static MiRtValue s_vm_binary_numeric(MiVmOp op, const MiRtValue* a, const MiRtValue* b)
 {
@@ -2072,7 +2071,7 @@ static MiRtValue s_vm_binary_compare(MiVmOp op, const MiRtValue* a, const MiRtVa
       default:            return mi_rt_make_void();
     }
   }
-      
+
 
   if ((a->kind == MI_RT_VAL_INT || a->kind == MI_RT_VAL_FLOAT) &&
       (b->kind == MI_RT_VAL_INT || b->kind == MI_RT_VAL_FLOAT))
@@ -2156,7 +2155,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
       case MI_VM_OP_LOAD_BLOCK:
         {
           MI_ASSERT(ins.a < MI_VM_REG_COUNT);
-          MI_ASSERT(ins.imm < chunk->const_count);
+          MI_ASSERT(ins.imm < (i32) chunk->const_count);
 
           if (ins.imm < 0 || (size_t)ins.imm >= chunk->subchunk_count)
           {
@@ -2176,7 +2175,6 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
       case MI_VM_OP_MOV:
         s_vm_reg_set(vm, ins.a, vm->regs[ins.b]);
         break;
-
 
       case MI_VM_OP_LIST_NEW:
         {
@@ -2547,7 +2545,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           MiRtValue base = vm->regs[ins.b];
           if (base.kind != MI_RT_VAL_BLOCK || !base.as.block || !base.as.block->env)
           {
-            mi_error("member assignment: base is not a chunk/module\n");
+            mi_error("member store: base is not a chunk/module\n");
             break;
           }
 
@@ -2903,7 +2901,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             break;
           }
 
-          /* Qualified call for dynamic heads (string). */
+          // Qualified call for dynamic heads (string).
           bool q_ok = false;
           MiRtValue q_ret = s_vm_exec_qualified_cmd(vm, head.as.s, argc, argv, &q_ok);
           if (q_ok)
@@ -2917,7 +2915,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             break;
           }
 
-          /* First: scoped commands stored as variables. */
+          // First: scoped commands stored as variables.
           MiRtValue scoped = mi_rt_make_void();
           if (mi_rt_var_get(vm->rt, head.as.s, &scoped) && scoped.kind == MI_RT_VAL_CMD)
           {
@@ -2947,7 +2945,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
         } break;
 
-case MI_VM_OP_CALL_BLOCK:
+      case MI_VM_OP_CALL_BLOCK:
         {
           MiRtValue ret = s_vm_exec_block_value(vm, vm->regs[ins.b], chunk, vm->dbg_ip);
           s_vm_reg_set(vm, ins.a, ret);
@@ -3033,6 +3031,7 @@ case MI_VM_OP_CALL_BLOCK:
 
   return last;
 }
+
 
 //----------------------------------------------------------
 // Disassembler

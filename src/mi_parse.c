@@ -673,7 +673,7 @@ static MiExpr* s_parse_primary(MiParser* p)
   //   list: '[' [expr (',' expr)* [',']] ']'
   //   dict: '[' [pair (',' pair)* [',']] ']'
   //   empty dict: '[:]'  (disambiguates from empty list '[]')
-  //   pair separators: ':' or '='  (both accepted)
+  //   pair separator: ':' only (k:v).
   if (s_parser_match(p, MI_TOK_LBRACKET))
   {
     MiToken lt = s_parser_prev(p);
@@ -705,8 +705,15 @@ static MiExpr* s_parse_primary(MiParser* p)
     MiExpr* first = s_parse_expr(p);
     if (!first) return NULL;
 
-    // Dict if the next token is ':' or '='.
-    if (p->current.kind == MI_TOK_COLON || p->current.kind == MI_TOK_EQ)
+    // Dict if the next token is ':'.
+    // Note: '=' is NOT a dict separator in the language.
+    if (p->current.kind == MI_TOK_EQ)
+    {
+      s_parser_set_error(p, "Unexpected '=' in dict literal. Use ':' for key:value pairs.", p->current);
+      return NULL;
+    }
+
+    if (p->current.kind == MI_TOK_COLON)
     {
       MiExprList* entries = NULL;
 
@@ -714,9 +721,9 @@ static MiExpr* s_parse_primary(MiParser* p)
       {
         MiExpr* key = first;
         MiToken sep = p->current;
-        if (!(s_parser_match(p, MI_TOK_COLON) || s_parser_match(p, MI_TOK_EQ)))
+        if (!s_parser_match(p, MI_TOK_COLON))
         {
-          s_parser_set_error(p, "Expected ':' or '=' in dict entry", p->current);
+          s_parser_set_error(p, "Expected ':' in dict entry", p->current);
           return NULL;
         }
 
@@ -1398,7 +1405,6 @@ static MiCommand* s_parse_assignment_stmt(MiParser* p, MiExpr* lhs)
   else if (lhs->kind == MI_EXPR_QUAL)
   {
     // qualified assignment: lower to set(<qual-expr>, rhs)
-    // compiler will lower this to a fast member store.
     lvalue = lhs;
   }
   else

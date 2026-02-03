@@ -523,12 +523,13 @@ bool mi_rt_var_get_from_id(MiScopeFrame* start, uint32_t sym_id, MiRtValue* out_
 
 void mi_rt_var_set_from_id(MiScopeFrame* start, uint32_t sym_id, MiRtValue value)
 {
-  if (!start)
+  if (!start || !start->rt)
   {
     return;
   }
 
   MiRuntime* rt = start->rt;
+
   MiScopeFrame* f = start;
   while (f)
   {

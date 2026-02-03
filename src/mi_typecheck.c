@@ -65,15 +65,13 @@ typedef struct MiBuiltinSig
   MiTypeKind  variadic_type;
 } MiBuiltinSig;
 
-/* MSVC does not like empty initializer lists for arrays in C mode.
-   Use NULL + count=0 for zero-arg builtins. */
 static const MiTypeKind s_sig_any_params_1[] = { MI_TYPE_ANY };
 
 static const MiBuiltinSig s_builtin_sigs[] =
 {
-  { "print",  MI_TYPE_VOID,   NULL,              0, true,  MI_TYPE_ANY },
+  { "print",  MI_TYPE_VOID,   NULL,               0, true,  MI_TYPE_ANY },
   { "len",    MI_TYPE_INT,    s_sig_any_params_1, 1, false, MI_TYPE_ANY },
-  { "trace",  MI_TYPE_VOID,   NULL,              0, false, MI_TYPE_ANY },
+  { "trace",  MI_TYPE_VOID,   NULL,               0, false, MI_TYPE_ANY },
   { "typeof", MI_TYPE_STRING, s_sig_any_params_1, 1, false, MI_TYPE_ANY },
   { "type",   MI_TYPE_STRING, s_sig_any_params_1, 1, false, MI_TYPE_ANY },
   { "t",      MI_TYPE_STRING, s_sig_any_params_1, 1, false, MI_TYPE_ANY },
@@ -91,6 +89,7 @@ static const MiBuiltinSig* s_find_builtin_sig(XSlice name)
   }
   return NULL;
 }
+
 //----------------------------------------------------------
 // Signature table (linear scan: fine for scripts)
 //----------------------------------------------------------
@@ -115,11 +114,11 @@ static const MiFuncSig* s_find_sig(const MiScript* script, XSlice name)
 
 
 static bool s_tc_match_params(const MiFuncTypeSig* expected,
-                               MiTypeKind got_ret,
-                               const MiTypeKind* got_params,
-                               int got_param_count,
-                               bool got_is_variadic,
-                               MiTypeKind got_variadic_type)
+    MiTypeKind got_ret,
+    const MiTypeKind* got_params,
+    int got_param_count,
+    bool got_is_variadic,
+    MiTypeKind got_variadic_type)
 {
   if (!expected)
   {
@@ -197,11 +196,11 @@ static bool s_tc_match_builtin_sig(const MiFuncTypeSig* expected, const MiBuilti
   }
 
   return s_tc_match_params(expected,
-                           got->ret_type,
-                           got->param_types,
-                           got->param_count,
-                           got->is_variadic,
-                           got->variadic_type);
+      got->ret_type,
+      got->param_types,
+      got->param_count,
+      got->is_variadic,
+      got->variadic_type);
 }
 
 //----------------------------------------------------------
@@ -212,6 +211,7 @@ typedef struct MiTcEnvEntry
 {
   XSlice name;
   MiTypeKind type;
+  const MiFuncTypeSig* func_sig;
 } MiTcEnvEntry;
 
 typedef struct MiTcEnv
@@ -220,23 +220,29 @@ typedef struct MiTcEnv
   int count;
 } MiTcEnv;
 
-static MiTypeKind s_env_get(const MiTcEnv* env, XSlice name)
+static const MiTcEnvEntry* s_env_get_entry(const MiTcEnv* env, XSlice name)
 {
   if (!env)
   {
-    return MI_TYPE_ANY;
+    return NULL;
   }
   for (int i = env->count - 1; i >= 0; i--)
   {
     if (s_slice_eq(env->entries[i].name, name))
     {
-      return env->entries[i].type;
+      return &env->entries[i];
     }
   }
-  return MI_TYPE_ANY;
+  return NULL;
 }
 
-static void s_env_set(MiTcEnv* env, XSlice name, MiTypeKind type)
+static MiTypeKind s_env_get(const MiTcEnv* env, XSlice name)
+{
+  const MiTcEnvEntry* e = s_env_get_entry(env, name);
+  return e ? e->type : MI_TYPE_ANY;
+}
+
+static void s_env_set(MiTcEnv* env, XSlice name, MiTypeKind type, const MiFuncTypeSig* func_sig)
 {
   if (!env)
   {
@@ -247,6 +253,7 @@ static void s_env_set(MiTcEnv* env, XSlice name, MiTypeKind type)
     if (s_slice_eq(env->entries[i].name, name))
     {
       env->entries[i].type = type;
+      env->entries[i].func_sig = func_sig;
       return;
     }
   }
@@ -254,6 +261,7 @@ static void s_env_set(MiTcEnv* env, XSlice name, MiTypeKind type)
   {
     env->entries[env->count].name = name;
     env->entries[env->count].type = type;
+    env->entries[env->count].func_sig = func_sig;
     env->count += 1;
   }
 }
@@ -294,7 +302,7 @@ static MiTypeKind s_tc_command_expr(const MiScript* script, const MiExpr* e, MiT
         }
         MiTypeKind expected = sig->params[i].type;
 
-MiFuncTypeSig* expected_func_sig = sig->params[i].func_sig;
+        MiFuncTypeSig* expected_func_sig = sig->params[i].func_sig;
         if (expected == MI_TYPE_FUNC && expected_func_sig != NULL)
         {
           const MiFuncSig* got_sig = NULL;
@@ -342,6 +350,61 @@ MiFuncTypeSig* expected_func_sig = sig->params[i].func_sig;
         it = it ? it->next : NULL;
       }
       return sig->ret_type;
+    }
+
+    /* If the head is a variable name whose type is func(..)->.., typecheck as an indirect call. */
+    const MiTcEnvEntry* ve = s_env_get_entry(env, name);
+    if (ve && ve->type == MI_TYPE_FUNC && ve->func_sig)
+    {
+      const MiFuncTypeSig* fs = ve->func_sig;
+
+      if (!fs->is_variadic)
+      {
+        if ((int)e->as.command.argc != fs->param_count)
+        {
+          s_tc_error(err, head->token, "Function call argument count mismatch");
+          return MI_TYPE_ANY;
+        }
+      }
+      else
+      {
+        if ((int)e->as.command.argc < fs->param_count)
+        {
+          s_tc_error(err, head->token, "Function call argument count mismatch");
+          return MI_TYPE_ANY;
+        }
+      }
+
+      const MiExprList* it = e->as.command.args;
+      for (int i = 0; i < (int)e->as.command.argc; i++)
+      {
+        const MiExpr* arg = it ? it->expr : NULL;
+        MiTypeKind got = s_tc_expr(script, arg, env, err);
+        if (err && err->message.length > 0)
+        {
+          return MI_TYPE_ANY;
+        }
+
+        MiTypeKind expected = MI_TYPE_ANY;
+        if (i < fs->param_count)
+        {
+          expected = fs->param_types[i];
+        }
+        else
+        {
+          expected = fs->variadic_type;
+        }
+
+        if (!s_type_compatible(got, expected))
+        {
+          s_tc_error(err, arg ? arg->token : head->token, "Function argument type mismatch");
+          return MI_TYPE_ANY;
+        }
+
+        it = it ? it->next : NULL;
+      }
+
+      return fs->ret_type;
     }
   }
 
@@ -420,78 +483,78 @@ static MiTypeKind s_tc_expr(const MiScript* script, const MiExpr* e, MiTcEnv* en
     case MI_EXPR_LIST: return MI_TYPE_LIST;
     case MI_EXPR_DICT: return MI_TYPE_DICT;
 
-    
-case MI_EXPR_VAR:
-  {
-    if (e->as.var.is_indirect)
-    {
-      return MI_TYPE_ANY;
-    }
 
-    MiTypeKind t = s_env_get(env, e->as.var.name);
-    if (t != MI_TYPE_ANY)
-    {
-      return t;
-    }
+    case MI_EXPR_VAR:
+                       {
+                         if (e->as.var.is_indirect)
+                         {
+                           return MI_TYPE_ANY;
+                         }
 
-    /* Treat known script functions as values of type func. */
-    if (s_find_sig(script, e->as.var.name) != NULL)
-    {
-      return MI_TYPE_FUNC;
-    }
+                         MiTypeKind t = s_env_get(env, e->as.var.name);
+                         if (t != MI_TYPE_ANY)
+                         {
+                           return t;
+                         }
 
-    /* Builtins with known signatures can be passed as callbacks. */
-    if (s_find_builtin_sig(e->as.var.name) != NULL)
-    {
-      return MI_TYPE_FUNC;
-    }
+                         /* Treat known script functions as values of type func. */
+                         if (s_find_sig(script, e->as.var.name) != NULL)
+                         {
+                           return MI_TYPE_FUNC;
+                         }
 
-    return MI_TYPE_ANY;
-  }
+                         /* Builtins with known signatures can be passed as callbacks. */
+                         if (s_find_builtin_sig(e->as.var.name) != NULL)
+                         {
+                           return MI_TYPE_FUNC;
+                         }
+
+                         return MI_TYPE_ANY;
+                       }
 
     case MI_EXPR_UNARY:
-      {
-        MiTypeKind t = s_tc_expr(script, e->as.unary.expr, env, err);
-        if (err && err->message.length > 0) return MI_TYPE_ANY;
-        if (e->as.unary.op == MI_TOK_NOT)
-        {
-          return MI_TYPE_BOOL;
-        }
-        if (e->as.unary.op == MI_TOK_MINUS)
-        {
-          if (!s_is_numeric(t))
-          {
-            s_tc_error(err, e->token, "Unary '-' requires numeric operand");
-            return MI_TYPE_ANY;
-          }
-          return t;
-        }
-        return MI_TYPE_ANY;
-      }
+                       {
+                         MiTypeKind t = s_tc_expr(script, e->as.unary.expr, env, err);
+                         if (err && err->message.length > 0) return MI_TYPE_ANY;
+                         if (e->as.unary.op == MI_TOK_NOT)
+                         {
+                           return MI_TYPE_BOOL;
+                         }
+                         if (e->as.unary.op == MI_TOK_MINUS)
+                         {
+                           if (!s_is_numeric(t))
+                           {
+                             s_tc_error(err, e->token, "Unary '-' requires numeric operand");
+                             return MI_TYPE_ANY;
+                           }
+                           return t;
+                         }
+                         return MI_TYPE_ANY;
+                       }
 
     case MI_EXPR_BINARY:
-      return s_tc_binary(script, e, env, err);
+                       return s_tc_binary(script, e, env, err);
 
     case MI_EXPR_INDEX:
-      {
-        // We can at least validate the container kind.
-        MiTypeKind tt = s_tc_expr(script, e->as.index.target, env, err);
-        if (err && err->message.length > 0) return MI_TYPE_ANY;
-        (void)s_tc_expr(script, e->as.index.index, env, err);
-        if (err && err->message.length > 0) return MI_TYPE_ANY;
-        if (tt != MI_TYPE_LIST && tt != MI_TYPE_DICT && tt != MI_TYPE_ANY)
-        {
-          s_tc_error(err, e->token, "Indexing requires list or dict");
-          return MI_TYPE_ANY;
-        }
-        return MI_TYPE_ANY;
-      }
+                       {
+                         // We can at least validate the container kind.
+                         MiTypeKind tt = s_tc_expr(script, e->as.index.target, env, err);
+                         if (err && err->message.length > 0) return MI_TYPE_ANY;
+                         (void)s_tc_expr(script, e->as.index.index, env, err);
+                         if (err && err->message.length > 0) return MI_TYPE_ANY;
+                         if (tt != MI_TYPE_LIST && tt != MI_TYPE_DICT && tt != MI_TYPE_ANY)
+                         {
+                           s_tc_error(err, e->token, "Indexing requires list or dict");
+                           return MI_TYPE_ANY;
+                         }
+                         return MI_TYPE_ANY;
+                       }
 
     case MI_EXPR_COMMAND:
-      return s_tc_command_expr(script, e, env, err);
+                       return s_tc_command_expr(script, e, env, err);
 
     case MI_EXPR_PAIR:
-      return MI_TYPE_ANY;
+                       return MI_TYPE_ANY;
   }
 
   return MI_TYPE_ANY;
@@ -684,7 +747,7 @@ static bool s_tc_script_in_func(const MiScript* script, const MiScript* body, co
 
   for (int i = 0; i < sig->param_count; ++i)
   {
-    s_env_set(&env, sig->params[i].name, sig->params[i].type);
+    s_env_set(&env, sig->params[i].name, sig->params[i].type, sig->params[i].func_sig);
   }
 
   bool definitely_returns = s_tc_script_definitely_returns(script, body, sig, &env, err);

@@ -44,7 +44,7 @@ typedef enum MiTokenKind
   MI_TOK_COMMA,       // ,
   MI_TOK_COLON,       // :
   MI_TOK_DOLLAR,      // $
-  MI_TOK_SEMICOLON,  // ';' statement terminator
+  MI_TOK_SEMICOLON,   // ';' statement terminator
   MI_TOK_PLUS,        // + 
   MI_TOK_MINUS,       // - 
   MI_TOK_STAR,        // * 
@@ -59,7 +59,6 @@ typedef enum MiTokenKind
   MI_TOK_DOUBLE_COLON,// ::
   MI_TOK_ERROR        // internal error token
 } MiTokenKind;
-
 
 
 // Backwards compatibility (older code used MI_TOK_NEWLINE for ';')
@@ -113,8 +112,8 @@ typedef enum MiExprKind
   MI_EXPR_DICT,             // [k = v, ...]  (pairs are only valid inside dict literals)
   MI_EXPR_PAIR,             // k = v (only produced inside dict literals)
   MI_EXPR_BLOCK,            // { script }
-  MI_EXPR_QUAL,             // target::member
-  MI_EXPR_COMMAND            // head_expr : arg_expr*  (when used in an expression)
+MI_EXPR_QUAL,             // target::member
+MI_EXPR_COMMAND            // head_expr : arg_expr*  (when used in an expression)
 } MiExprKind;
 
 //----------------------------------------------------------
@@ -135,7 +134,7 @@ typedef enum MiTypeKind
   MI_TYPE_ANY
 } MiTypeKind;
 
-/* Optional function signature used in type annotations like func(int)->void. */
+// Optional function signature used in type annotations like func(int)->void.
 typedef struct MiFuncTypeSig
 {
   MiToken     func_tok;
@@ -261,8 +260,8 @@ typedef struct MiCommand
      include "path" as name;
      import  "path" as name;
      The parser sets these fields and the compiler lowers it to:
-       r0 = include(path)
-       name = r0
+     r0 = include(path)
+     name = r0
      So 'as name' is not passed as runtime arguments. */
   bool      is_include_stmt;
   MiToken   include_alias_tok;
@@ -297,17 +296,17 @@ void mi_parse_print_error(XSlice source, const MiParseResult* res);
  * @return MiParseResult with ok/script or error info.
  */
 MiParseResult mi_parse_program(const char *source,
-    size_t      source_len,
-    XArena     *arena);
+    size_t    source_len,
+    XArena    *arena);
 
 /**
  * Parse a full Minima script, optionally applying constant folding.
  * When fold_constants is true, the resulting AST is simplified in-place.
  */
 MiParseResult mi_parse_program_ex(const char *source,
-    size_t      source_len,
-    XArena     *arena,
-    bool        fold_constants);
+    size_t    source_len,
+    XArena    *arena,
+    bool      fold_constants);
 
 //----------------------------------------------------------
 // Debug print helpers

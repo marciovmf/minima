@@ -439,7 +439,9 @@ static bool s_save_chunk(FILE* f, const MiVmChunk* c, const MiMixChunkMap* map)
     }
   }
 
-  /* Debug info (v2+): optional but always encoded for forward stability. */
+  /* Debug info: optional payload, but the presence byte is always encoded.
+     This keeps the stream layout stable across versions (version is only a
+     compatibility gate: file_version <= MI_MX_VERSION). */
   {
     bool has_dbg = (c->dbg_name.length != 0u) || (c->dbg_file.length != 0u) || (c->dbg_lines != NULL) || (c->dbg_cols != NULL);
     if (!s_write_u8(f, (uint8_t)(has_dbg ? 1 : 0)))
@@ -578,6 +580,7 @@ static void s_free_chunk_payload(MiVmChunk* c)
 
 static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chunk_count, uint32_t** out_subidx)
 {
+  (void) version;
   memset(out, 0, sizeof(*out));
 
   // Code
@@ -631,29 +634,29 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
         out->consts[i] = mi_rt_make_void();
         break;
       case MI_MX_CONST_INT:
-      {
-        uint64_t v = 0;
-        if (!s_read_u64(f, &v)) return false;
-        out->consts[i] = mi_rt_make_int((long long)v);
-      } break;
+        {
+          uint64_t v = 0;
+          if (!s_read_u64(f, &v)) return false;
+          out->consts[i] = mi_rt_make_int((long long)v);
+        } break;
       case MI_MX_CONST_FLOAT:
-      {
-        double v = 0;
-        if (!s_read_f64(f, &v)) return false;
-        out->consts[i] = mi_rt_make_float(v);
-      } break;
+        {
+          double v = 0;
+          if (!s_read_f64(f, &v)) return false;
+          out->consts[i] = mi_rt_make_float(v);
+        } break;
       case MI_MX_CONST_BOOL:
-      {
-        uint8_t b = 0;
-        if (!s_read_u8(f, &b)) return false;
-        out->consts[i] = mi_rt_make_bool(b != 0);
-      } break;
+        {
+          uint8_t b = 0;
+          if (!s_read_u8(f, &b)) return false;
+          out->consts[i] = mi_rt_make_bool(b != 0);
+        } break;
       case MI_MX_CONST_STRING:
-      {
-        XSlice s;
-        if (!s_read_slice(f, &s)) return false;
-        out->consts[i] = mi_rt_make_string_slice(s);
-      } break;
+        {
+          XSlice s;
+          if (!s_read_slice(f, &s)) return false;
+          out->consts[i] = mi_rt_make_string_slice(s);
+        } break;
       default:
         return false;
     }
@@ -751,11 +754,18 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
     }
   }
 
-  /* Debug info (v2+). */
-  if (version >= 2u)
+  /* Debug info: always encoded as a presence byte + optional payload.
+     Do not gate this on file version; version is only used as a compatibility
+     check (file_version <= MI_MX_VERSION). */
   {
     uint8_t has_dbg = 0;
     if (!s_read_u8(f, &has_dbg))
+    {
+      free(idxs);
+      return false;
+    }
+
+    if (has_dbg != 0u && has_dbg != 1u)
     {
       free(idxs);
       return false;
@@ -820,7 +830,7 @@ bool mi_mx_load_file(MiVm* vm, const char* filename, MiMixProgram* out_program)
     fclose(f);
     return false;
   }
-  if (h.version != MI_MX_VERSION)
+  if (h.version < 1u || h.version > MI_MX_VERSION)
   {
     fclose(f);
     return false;
