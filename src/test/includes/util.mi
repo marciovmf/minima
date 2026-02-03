@@ -1,0 +1,17 @@
+
+func sum(a:int, b:int) -> int { return a + b; }
+
+pi = 0.14150 + 1.5 * 2;
+
+func assert_eq(got, expected, label)
+{
+  if (got == expected)
+  {
+    print("OK  ", label, "->", got);
+  }
+  else
+  {
+    print("FAIL", label, "got:", got, "expected:", expected);
+    trace();
+  }
+}

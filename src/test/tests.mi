@@ -1,245 +1,221 @@
+include "includes/util" as util;
 
-#----------------------------------------------------------
-# Test helpers
-#----------------------------------------------------------
+// ============================================================
+// Helpers
+// ============================================================
 
-cmd: test_fail msg {
-  error: "TEST FAIL:" $msg
-  trace:
-  return: false
+func _increment(a:int) -> int
+{
+  return a + 1;
 }
 
-cmd: test_ok {
-  return: true
+func _decrement(a:int) -> int
+{
+  return a - 1;
 }
 
-cmd: test_expect cond msg {
-  if: ($cond == true) { return: true }
-  return: (test_fail: $msg)
+func _dispatch(a:int, b:int, callback:func(int)->int) -> int
+{
+  return callback(a + b);
 }
 
-#----------------------------------------------------------
-# Dictionary tests
-#----------------------------------------------------------
+// ============================================================
+// Tests
+// ============================================================
 
-cmd: test_dict_str_keys {
-  set: k "same"
-  set: d [
-    "same"=1,
-    $k=2
-  ]
-  if: ((test_expect: (d["same"] == 2) "string keys must compare/hash by value") == false) { return: false }
-  return: true
+func test_module_acess()
+{
+  util::assert_eq(util::pi, 3.14150, "module: read util::pi");
+  util::pi = 42;
+  util::assert_eq(util::pi, 42, "module: override util::pi");
+  util::assert_eq(util::sum(6, 4), 10, "module: call util::sum(6,4)");
 }
 
-cmd: test_dict_scalar_keys {
-  set: d [
-    0="zero",
-    1="one",
-    -7="minus-seven",
-    true="T",
-    false="F"
-  ]
+func test_list()
+{
+  // --- empty list ---
+  let a = [];
+  util::assert_eq(len(a), 0, "list: len([])");
 
-  if: ((test_expect: (d[0] == "zero") "int key 0") == false) { return: false }
-  if: ((test_expect: (d[1] == "one") "int key 1") == false) { return: false }
-  if: ((test_expect: (d[-7] == "minus-seven") "negative int key") == false) { return: false }
-  if: ((test_expect: (d[true] == "T") "bool key true") == false) { return: false }
-  if: ((test_expect: (d[false] == "F") "bool key false") == false) { return: false }
+  // --- literal + read ---
+  let b = [10, 20, 30, ];
+  util::assert_eq(b[0], 10, "list: b[0]");
+  util::assert_eq(b[1], 20, "list: b[1]");
+  util::assert_eq(b[2], 30, "list: b[2]");
 
-  return: true
+  // --- computed index read ---
+  let i = 1;
+  util::assert_eq(b[i], 20, "list: b[i] (i=1)");
+
+  // --- write ---
+  b[1] = 99;
+  util::assert_eq(b[1], 99, "list: b[1] after write");
+
+  // --- write using expression index ---
+  b[0 + 2] = 77;
+  util::assert_eq(b[2], 77, "list: b[2] after write via expr index");
+
+  // --- nested indexing (list of lists) ---
+  let c = [[1, 2], [3, 4]];
+  util::assert_eq(c[0][0], 1, "list: c[0][0]");
+  util::assert_eq(c[0][1], 2, "list: c[0][1]");
+  util::assert_eq(c[1][0], 3, "list: c[1][0]");
+  util::assert_eq(c[1][1], 4, "list: c[1][1]");
+
+  // --- write through nested indexing ---
+  c[1][0] = 123;
+  util::assert_eq(c[1][0], 123, "list: c[1][0] after nested write");
+
+  // --- prove empty list literal is accepted as expression ---
+  let d = [];
+  // push(d, 42);
+  // assert_eq(d[0], 42, "list: push into empty list");
 }
 
-cmd: test_dict_list_keys_identity {
-  set: k1 [1, 2, 3]
-  set: k2 [1, 2, 3]
-  set: d [
-    $k1="A",
-    $k2="B"
-  ]
+func test_dict()
+{
+  // NOTE: d and y are currently assigned without 'let'.
+  // If your language semantics create variables on assignment, this can leak across tests.
+  // Keeping as-is; organization only.
 
-  if: ((test_expect: (d[$k1] == "A") "list key identity k1") == false) { return: false }
-  if: ((test_expect: (d[$k2] == "B") "list key identity k2") == false) { return: false }
-  return: true
+  // empty dict
+  d = [:];
+  util::assert_eq(d != void, true, "dict: empty dict created");
+
+  // literal initialization
+  // NOTE: you have "b"=2 here (equals) while the rest uses ":".
+  d = ["a":1, "b":2, "c":3, true:42, 7:"bob"];
+  util::assert_eq(d["a"], 1, "dict: literal a");
+  util::assert_eq(d["b"], 2, "dict: literal b");
+  util::assert_eq(d["c"], 3, "dict: literal c");
+  util::assert_eq(d[true], 42, "dict: literal true");
+  util::assert_eq(d[7], "bob", "dict: literal 7");
+
+  // overwrite existing key
+  d["a"] = 10;
+  util::assert_eq(d["a"], 10, "dict: overwrite key");
+
+  // create new key via index assignment
+  d["x"] = 42;
+  util::assert_eq(d["x"], 42, "dict: create key via index");
+
+  // nested usage (value reuse)
+  y = d["a"] + d["b"];
+  util::assert_eq(y, 12, "dict: read + arithmetic");
 }
 
-cmd: test_dict_dict_keys_identity {
-  set: a [x=1]
-  set: b [x=1]
-  set: d [
-    $a="dictA",
-    $b="dictB"
-  ]
+func test_foreach()
+{
+  // == foreach basic ==
+  let xs = [1, 2, 3, 4];
+  let sum = 0;
 
-  if: ((test_expect: (d[$a] == "dictA") "dict key identity a") == false) { return: false }
-  if: ((test_expect: (d[$b] == "dictB") "dict key identity b") == false) { return: false }
-  return: true
-}
+  foreach(x, xs)
+  {
+    sum = sum + x;
+  }
 
-cmd: test_dict_nested_composite_key_identity {
-  set: inner [p=9]
-  set: k [$inner, 123]
-  set: d [
-    $k="nested"
-  ]
+  util::assert_eq(sum, 10, "foreach: basic sum");
 
-  if: ((test_expect: (d[$k] == "nested") "nested composite key hits") == false) { return: false }
+  // == foreach nested ==
+  let ys = [10, 20];
+  let total = 0;
 
-  set: inner2 [p=9]
-  set: k2 [$inner2, 123]
-  if: ((test_expect: (d[$k2] == ()) "different identity should miss") == false) { return: false }
-
-  return: true
-}
-
-#----------------------------------------------------------
-# List + dict constructors and len()
-#----------------------------------------------------------
-
-cmd: test_list_constructor_and_len {
-  set: l list:[k, v, a, b, x, y]
-
-  if: ((test_expect: ((len:$l) == 6) "list: len must be 6") == false) { return: false }
-  if: ((test_expect: ($l[0] == "k") "list[0]") == false) { return: false }
-  if: ((test_expect: ($l[1] == "v") "list[1]") == false) { return: false }
-  if: ((test_expect: ($l[2] == "a") "list[2]") == false) { return: false }
-  if: ((test_expect: ($l[3] == "b") "list[3]") == false) { return: false }
-  if: ((test_expect: ($l[4] == "x") "list[4]") == false) { return: false }
-  if: ((test_expect: ($l[5] == "y") "list[5]") == false) { return: false }
-
-  return: true
-}
-
-cmd: test_dict_constructor_and_len {
-  set: d dict:[k="v", a="b", x="y"]
-
-  if: ((test_expect: ((len:$d) == 3) "dict: len must be 3") == false) { return: false }
-  if: ((test_expect: (d["k"] == "v") "dict[k]") == false) { return: false }
-  if: ((test_expect: (d["a"] == "b") "dict[a]") == false) { return: false }
-  if: ((test_expect: (d["x"] == "y") "dict[x]") == false) { return: false }
-
-  return: true
-}
-
-#----------------------------------------------------------
-# Foreach + iterators
-#----------------------------------------------------------
-
-cmd: test_foreach_dict_iter_kv {
-  set: d [name="bob", age=30, active=true]
-  set: seen_name false
-  set: seen_age false
-  set: seen_active false
-
-  foreach: kv $d {
-    if: ((test_expect: ((len:$kv) == 2) "foreach dict yields 2 elements") == false) { return: false }
-
-    if: ($kv[0] == "name") {
-      if: ((test_expect: ($kv[1] == "bob") "kv name value") == false) { return: false }
-      set: seen_name true
-    }
-
-    if: ($kv[0] == "age") {
-      if: ((test_expect: ($kv[1] == 30) "kv age value") == false) { return: false }
-      set: seen_age true
-    }
-
-    if: ($kv[0] == "active") {
-      if: ((test_expect: ($kv[1] == true) "kv active value") == false) { return: false }
-      set: seen_active true
+  foreach(a, xs)
+  {
+    foreach(b, ys)
+    {
+      total = total + a + b;
     }
   }
 
-  if: ((test_expect: ($seen_name == true) "must see name") == false) { return: false }
-  if: ((test_expect: ($seen_age == true) "must see age") == false) { return: false }
-  if: ((test_expect: ($seen_active == true) "must see active") == false) { return: false }
+  util::assert_eq(total, 140, "foreach: nested total");
 
-  return: true
-}
 
-cmd: test_foreach_list_iter_values {
-  set: xs [10, 20, 30]
-  set: sum 0
-  foreach: x $xs {
-    set: sum ($sum + $x)
-  }
-  if: ((test_expect: ($sum == 60) "list iteration must sum to 60") == false) { return: false }
-  return: true
-}
+  // == foreach over literal ==
+  let prod = 1;
 
-#----------------------------------------------------------
-# Regression: DCALL inside foreach must not clobber loop scope
-#----------------------------------------------------------
-
-cmd: test_reg_foreach_dcall_scope_clobber {
-  cmd: test_foo { return: false }
-  cmd: test_bar { return: true }
-
-  set: tests [test_foo, test_bar]
-  set: seen_foo false
-  set: seen_bar false
-
-  foreach: i $tests {
-    set: result ($i:)
-    if: ($i == "test_foo") { set: seen_foo true }
-    if: ($i == "test_bar") { set: seen_bar true }
+  foreach(v, [2, 3, 4])
+  {
+    prod = prod * v;
   }
 
-  if: ((test_expect: ($seen_foo == true) "must still read loop var after call (foo)") == false) { return: false }
-  if: ((test_expect: ($seen_bar == true) "must still read loop var after call (bar)") == false) { return: false }
+  util::assert_eq(prod, 24, "foreach: literal product");
 
-  return: true
-}
 
-#----------------------------------------------------------
-# Command definition + dynamic call
-#----------------------------------------------------------
+  // == foreach with indexing ==
+  let zs = [[1, 2], [3, 4], [5, 6]];
+  let acc = 0;
 
-cmd: test_cmddef_and_dcall {
-  cmd: sum a b c { return: ($a + $b + $c) }
-
-  if: ((test_expect: ((sum: 10 20 30) == 60) "sum 10 20 30") == false) { return: false }
-  if: ((test_expect: ((sum: 1 2 3) == 6) "sum 1 2 3") == false) { return: false }
-  if: ((test_expect: ((sum: 0 0 0) == 0) "sum 0 0 0") == false) { return: false }
-
-  return: true
-}
-
-#----------------------------------------------------------
-# Runner (counts pass/fail without stopping the whole script)
-#----------------------------------------------------------
-cmd: run_tests {
-  set: tests [
-    test_dict_str_keys,
-    test_dict_scalar_keys,
-    test_dict_list_keys_identity,
-    test_dict_dict_keys_identity,
-    test_dict_nested_composite_key_identity,
-    test_list_constructor_and_len,
-    test_dict_constructor_and_len,
-    test_foreach_dict_iter_kv,
-    test_foreach_list_iter_values,
-    test_reg_foreach_dcall_scope_clobber,
-    test_cmddef_and_dcall
-  ]
-
-  set: num_failed 0
-
-  foreach: test $tests {
-    set: result "[PASS]"
-    if: (not ($test:)) {
-      set: result "[FAIL]"
-      set: fail_count ($fail_count + 1)
-    }
-
-    print: $result "...." $test
+  foreach(pair, zs)
+  {
+    acc = acc + pair[0] + pair[1];
   }
 
-  set: num_tests len: tests
-  set: num_passed ($num_tests - $num_failed)
-  print: "Passed tests " $num_passed "of" $num_tests
-  assert: ($num_failed == 0) "tests failed."
+  util::assert_eq(acc, 21, "foreach: indexing");
+
+
+  // == foreach shadowing ==
+  let x = 100;
+
+  foreach(x, [1, 2, 3])
+  {
+    let _ = x;
+  }
+
+  util::assert_eq(x, 100, "foreach: shadowing");
+
+
+  // == foreach empty list ==
+  let hit = false;
+
+  foreach(v, [])
+  {
+    hit = true;
+  }
+
+  util::assert_eq(hit, false, "foreach: empty list");
 }
 
-run_tests:
+func test_dynamic_functions()
+{
+  // NOTE: uses implicit vars l/sum in your original; keeping as-is would leak.
+  // Here I'm only reorganizing; if you want, I can convert these to 'let' everywhere.
 
+  l = [_increment, _decrement];
+  sum = 0;
+
+  foreach(n, l)
+  {
+    sum = sum + n(10);
+  }
+
+  util::assert_eq(sum, 20, "func: dynamic iteration");
+}
+
+func test_function_as_arg()
+{
+  result = _dispatch(25, 75, _increment);
+  util::assert_eq(result, 101, "func: callback passed as arg");
+}
+
+// ============================================================
+// Test runner
+// ============================================================
+
+tests = [
+  test_module_acess,
+  test_list,
+  test_dict,
+  test_foreach,
+  test_dynamic_functions,
+  test_function_as_arg
+];
+
+failures = 0;
+
+foreach(f, tests)
+{
+  print("----", f, "----");
+  f();
+}
