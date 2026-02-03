@@ -456,6 +456,14 @@ extern "C" {
   size_t x_fs_path_set(XFSPath* p, const char* cstr);
 
   /**
+   * @brief Set a path from a stdx slice.
+   * @param p Path to set.
+   * @param slice stdx slice string.
+   * @return Length written to p.
+   */
+  size_t x_fs_path_set_slice(XFSPath* p, XSlice slice);
+
+  /**
    * @brief Split a path string into components.
    * @param input Path as a C string.
    * @param out_components Output array of components.
@@ -1255,6 +1263,12 @@ extern "C" {
     return x_smallstr_from_cstr(p, cstr);
   }
 
+  size_t x_fs_path_set_slice(XFSPath* p, XSlice slice)
+  {
+    if (!x_fs_utf8_validate(slice.ptr, slice.length)) return 0;
+    return x_smallstr_from_slice(slice, p);
+  }
+
   size_t x_fs_path_append(XFSPath* p, const char* comp)
   {
     if (p->length > 0 && p->buf[p->length - 1] != PATH_SEPARATOR)
@@ -1793,7 +1807,7 @@ extern "C" {
   bool x_fs_file_modification_time(const char* path, time_t* out_time)
   {
     FSFileStat stat;
-    if (x_fs_file_stat(path, &stat) != 0) return false;
+    if (x_fs_file_stat(path, &stat) == false) return false;
     *out_time = stat.modification_time;
     return true;
   }
@@ -1801,7 +1815,7 @@ extern "C" {
   bool x_fs_file_creation_time(const char* path, time_t* out_time)
   {
     FSFileStat stat;
-    if (x_fs_file_stat(path, &stat) != 0) return false;
+    if (x_fs_file_stat(path, &stat) == false) return false;
     *out_time = stat.creation_time;
     return true;
   }
@@ -1809,7 +1823,7 @@ extern "C" {
   bool x_fs_file_permissions(const char* path, uint32_t* out_permissions)
   {
     FSFileStat stat;
-    if (x_fs_file_stat(path, &stat) != 0) return false;
+    if (x_fs_file_stat(path, &stat) == false) return false;
     *out_permissions = stat.permissions;
     return true;
   }
