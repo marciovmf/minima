@@ -49,10 +49,14 @@ typedef struct MiVmCallFrame
  */
 typedef MiRtValue (*MiVmCommandFn)(MiVm* vm, XSlice name, int argc, const MiRtValue* argv);
 
+/* Native function entrypoint used by host-defined commands.
+   Native functions are first-class cmd values and may carry a required type signature. */
+typedef MiRtValue (*MiVmNativeFn)(MiVm* vm, void* user, int argc, const MiRtValue* argv);
+
 typedef struct MiVmCommandEntry
 {
   XSlice         name;
-  MiVmCommandFn  fn;
+  MiRtValue      value; /* MI_RT_VAL_CMD (retained by VM) */
 } MiVmCommandEntry;
 
 typedef struct MiVmModuleCacheEntry
@@ -143,7 +147,7 @@ typedef enum MiVmOp
   MI_VM_OP_RETURN,
   MI_VM_OP_HALT,
 
-  /* Fast command call: directly invoke chunk->cmd_fns[imm].
+  /* Fast command call: invoke cached chunk->cmd_targets[imm] (cmd value).
      No qualified-name resolution, and no scoped shadowing lookup.
      Compiler should emit this only for known, unqualified command heads. */
   MI_VM_OP_CALL_CMD_FAST,
@@ -173,7 +177,7 @@ struct MiVmChunk
   size_t     symbol_count;
   size_t     symbol_capacity;
 
-  MiVmCommandFn* cmd_fns;     // resolved command functions
+  MiRtCmd**      cmd_targets; // resolved command callables (cached)
   XSlice*        cmd_names;   // optional: for debug
   size_t         cmd_count;
   size_t         cmd_capacity;
@@ -193,6 +197,11 @@ struct MiVmChunk
 struct MiVm
 {
   MiRuntime* rt;
+
+  /* VM-owned allocations that live for the lifetime of the VM.
+     Used for module cache keys and other long-lived strings.
+     (This is NOT for runtime values; those are owned by MiRuntime.) */
+  XArena* perm_arena;
 
   /* Module cache directory for include:.
      If cache_dir_set is false, include: selects a platform default.
@@ -228,6 +237,12 @@ struct MiVm
   int       arg_frame_tops[MI_VM_ARG_FRAME_MAX];
   int       arg_frame_depth;
 
+  // Current call context (for argc()/arg()/arg_type()/arg_name()).
+  int                cur_argc;
+  const MiRtValue*    cur_argv;
+  const MiRtCmd*      cur_cmd;
+  XSlice              cur_cmd_name;
+
   // Debug: track current instruction and call stack for trace:.
   const MiVmChunk*  dbg_chunk;
   size_t            dbg_ip; /* last fetched instruction index (0-based). */
@@ -248,14 +263,25 @@ void      mi_vm_shutdown(MiVm* vm);
  */
 void      mi_vm_set_cache_dir(MiVm* vm, const char* path);
 
-/**
- * Register a VM command (this is separate from mi_rt_register_command).
- */
+/* Register a command implemented in C as a first-class cmd value.
+   This is the ONLY command registration mechanism: commands are values.
+   The VM retains the created cmd value for its lifetime.
+*/
+/* Register a native command implemented in C.
+   sig is required for all commands. Variadics can be expressed via MiFuncTypeSig.
+   doc may be empty.
+   The VM retains the created cmd value for its lifetime.
+*/
+bool      mi_vm_register_native(MiVm* vm, XSlice name, const MiFuncTypeSig* sig, MiVmNativeFn fn, void* user, XSlice doc);
+
+/* Deprecated: legacy registration without signature/userdata.
+   Prefer mi_vm_register_native. */
 bool      mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn);
 
-/**
- * Find a registered command by name. Returns NULL if not found.
- */
+/* Find a registered command value by name. Returns false if not found. */
+bool      mi_vm_find_command(MiVm* vm, XSlice name, MiRtValue* out_cmd);
+
+/* Legacy helper used by compiler fast-path linking (native-only). */
 MiVmCommandFn mi_vm_find_command_fn(MiVm* vm, XSlice name);
 
 
@@ -267,6 +293,17 @@ void      mi_vm_chunk_destroy(MiVmChunk* chunk);
  * Execute a compiled chunk. Returns last command value.
  */
 MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk);
+
+/* Link a chunk's command ids to resolved command callables.
+   This fills chunk->cmd_targets[i] when possible.
+
+   Unqualified names must resolve via mi_vm_find_command().
+   Qualified names (with ::) are best-effort: if their namespace is not
+   available yet, they remain unresolved and can be lazily resolved and cached
+   at first call.
+
+   Returns false only if an unqualified command cannot be resolved. */
+bool mi_vm_link_chunk_commands(MiVm* vm, MiVmChunk* chunk);
 
 /**
  * Debug: pretty-print bytecode to stdout.

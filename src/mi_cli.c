@@ -370,6 +370,15 @@ static int s_cmd_run_source(const char* mi_file, const char* cache_dir)
     (void)mi_mx_save_file(ch, cached_mx.buf);
   }
 
+  if (!mi_vm_link_chunk_commands(&vm, ch))
+  {
+    mi_error("Link failed: unresolved command(s)\n");
+    mi_vm_chunk_destroy(ch);
+    mi_vm_shutdown(&vm);
+    mi_rt_shutdown(&rt);
+    return 1;
+  }
+
   (void)mi_vm_execute(&vm, ch);
   mi_vm_chunk_destroy(ch);
 

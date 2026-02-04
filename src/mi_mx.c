@@ -162,7 +162,7 @@ static bool s_write_slice(FILE* f, XSlice s)
   return s_write_bytes(f, s.ptr, s.length);
 }
 
-static bool s_read_slice(FILE* f, XSlice* out)
+static bool s_read_slice(FILE* f, XArena* arena, XSlice* out)
 {
   uint32_t n = 0;
   if (!s_read_u32(f, &n))
@@ -175,35 +175,18 @@ static bool s_read_slice(FILE* f, XSlice* out)
     out->length = 0;
     return true;
   }
-  char* p = (char*)malloc((size_t)n);
+  char* p = (char*)x_arena_alloc(arena, (size_t)n);
   if (!p)
   {
     return false;
   }
   if (!s_read_bytes(f, p, (size_t)n))
   {
-    free(p);
     return false;
   }
   out->ptr = p;
   out->length = n;
   return true;
-}
-
-static MiVmCommandFn s_lookup_cmd_fn(MiVm* vm, XSlice name)
-{
-  if (!vm)
-  {
-    return NULL;
-  }
-  for (size_t i = 0; i < vm->command_count; ++i)
-  {
-    if (s_x_slice_eq(vm->commands[i].name, name))
-    {
-      return vm->commands[i].fn;
-    }
-  }
-  return NULL;
 }
 
 //----------------------------------------------------------
@@ -527,58 +510,7 @@ bool mi_mx_save_file(const MiVmChunk* entry, const char* filename)
 // Load
 //----------------------------------------------------------
 
-static void s_free_chunk_payload(MiVmChunk* c)
-{
-  if (!c)
-  {
-    return;
-  }
-
-  free(c->code);
-
-  // constants: release strings (they are malloc'd slices)
-  if (c->consts)
-  {
-    for (size_t i = 0; i < c->const_count; ++i)
-    {
-      if (c->consts[i].kind == MI_RT_VAL_STRING)
-      {
-        free((void*)c->consts[i].as.s.ptr);
-      }
-    }
-  }
-  free(c->consts);
-
-  if (c->symbols)
-  {
-    for (size_t i = 0; i < c->symbol_count; ++i)
-    {
-      free((void*)c->symbols[i].ptr);
-    }
-  }
-  free(c->symbols);
-
-  if (c->cmd_names)
-  {
-    for (size_t i = 0; i < c->cmd_count; ++i)
-    {
-      free((void*)c->cmd_names[i].ptr);
-    }
-  }
-  free(c->cmd_names);
-
-  free(c->cmd_fns);
-  free(c->subchunks);
-
-  free(c->dbg_lines);
-  free(c->dbg_cols);
-  if (c->dbg_name.ptr) free((void*)c->dbg_name.ptr);
-  if (c->dbg_file.ptr) free((void*)c->dbg_file.ptr);
-
-  memset(c, 0, sizeof(*c));
-}
-
-static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chunk_count, uint32_t** out_subidx)
+static bool s_load_chunk(FILE* f, XArena* arena, MiVmChunk* out, uint32_t version, uint32_t chunk_count, uint32_t** out_subidx)
 {
   (void) version;
   memset(out, 0, sizeof(*out));
@@ -591,7 +523,7 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
   }
   if (code_n)
   {
-    out->code = (MiVmIns*)malloc((size_t)code_n * sizeof(MiVmIns));
+    out->code = (MiVmIns*)x_arena_alloc(arena, (size_t)code_n * sizeof(MiVmIns));
     if (!out->code)
     {
       return false;
@@ -612,7 +544,7 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
   }
   if (const_n)
   {
-    out->consts = (MiRtValue*)calloc((size_t)const_n, sizeof(MiRtValue));
+    out->consts = (MiRtValue*)x_arena_alloc_zero(arena, (size_t)const_n * sizeof(MiRtValue));
     if (!out->consts)
     {
       return false;
@@ -654,7 +586,7 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
       case MI_MX_CONST_STRING:
         {
           XSlice s;
-          if (!s_read_slice(f, &s)) return false;
+          if (!s_read_slice(f, arena, &s)) return false;
           out->consts[i] = mi_rt_make_string_slice(s);
         } break;
       default:
@@ -670,7 +602,7 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
   }
   if (sym_n)
   {
-    out->symbols = (XSlice*)calloc((size_t)sym_n, sizeof(XSlice));
+    out->symbols = (XSlice*)x_arena_alloc_zero(arena, (size_t)sym_n * sizeof(XSlice));
     if (!out->symbols)
     {
       return false;
@@ -681,7 +613,7 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
 
   for (uint32_t i = 0; i < sym_n; ++i)
   {
-    if (!s_read_slice(f, &out->symbols[i]))
+    if (!s_read_slice(f, arena, &out->symbols[i]))
     {
       return false;
     }
@@ -695,9 +627,9 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
   }
   if (cmd_n)
   {
-    out->cmd_names = (XSlice*)calloc((size_t)cmd_n, sizeof(XSlice));
-    out->cmd_fns = (MiVmCommandFn*)calloc((size_t)cmd_n, sizeof(MiVmCommandFn));
-    if (!out->cmd_names || !out->cmd_fns)
+    out->cmd_names = (XSlice*)x_arena_alloc_zero(arena, (size_t)cmd_n * sizeof(XSlice));
+    out->cmd_targets = (MiRtCmd**)x_arena_alloc_zero(arena, (size_t)cmd_n * sizeof(MiRtCmd*));
+    if (!out->cmd_names || !out->cmd_targets)
     {
       return false;
     }
@@ -707,7 +639,7 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
 
   for (uint32_t i = 0; i < cmd_n; ++i)
   {
-    if (!s_read_slice(f, &out->cmd_names[i]))
+    if (!s_read_slice(f, arena, &out->cmd_names[i]))
     {
       return false;
     }
@@ -721,7 +653,7 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
   }
   if (sub_n)
   {
-    out->subchunks = (MiVmChunk**)calloc((size_t)sub_n, sizeof(MiVmChunk*));
+    out->subchunks = (MiVmChunk**)x_arena_alloc_zero(arena, (size_t)sub_n * sizeof(MiVmChunk*));
     if (!out->subchunks)
     {
       return false;
@@ -733,7 +665,7 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
   uint32_t* idxs = NULL;
   if (sub_n)
   {
-    idxs = (uint32_t*)calloc((size_t)sub_n, sizeof(uint32_t));
+    idxs = (uint32_t*)x_arena_alloc_zero(arena, (size_t)sub_n * sizeof(uint32_t));
     if (!idxs)
     {
       return false;
@@ -744,12 +676,10 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
   {
     if (!s_read_u32(f, &idxs[i]))
     {
-      free(idxs);
       return false;
     }
     if (idxs[i] >= chunk_count)
     {
-      free(idxs);
       return false;
     }
   }
@@ -761,38 +691,35 @@ static bool s_load_chunk(FILE* f, MiVmChunk* out, uint32_t version, uint32_t chu
     uint8_t has_dbg = 0;
     if (!s_read_u8(f, &has_dbg))
     {
-      free(idxs);
       return false;
     }
 
     if (has_dbg != 0u && has_dbg != 1u)
     {
-      free(idxs);
       return false;
     }
 
     if (has_dbg)
     {
-      if (!s_read_slice(f, &out->dbg_name)) { free(idxs); return false; }
-      if (!s_read_slice(f, &out->dbg_file)) { free(idxs); return false; }
+      if (!s_read_slice(f, arena, &out->dbg_name)) return false;
+      if (!s_read_slice(f, arena, &out->dbg_file)) return false;
 
       if (out->code_count)
       {
-        out->dbg_lines = (uint32_t*)calloc(out->code_count, sizeof(uint32_t));
-        out->dbg_cols = (uint32_t*)calloc(out->code_count, sizeof(uint32_t));
+        out->dbg_lines = (uint32_t*)x_arena_alloc_zero(arena, out->code_count * sizeof(uint32_t));
+        out->dbg_cols = (uint32_t*)x_arena_alloc_zero(arena, out->code_count * sizeof(uint32_t));
         if (!out->dbg_lines || !out->dbg_cols)
         {
-          free(idxs);
           return false;
         }
 
         for (size_t i = 0; i < out->code_count; ++i)
         {
-          if (!s_read_u32(f, &out->dbg_lines[i])) { free(idxs); return false; }
+          if (!s_read_u32(f, &out->dbg_lines[i])) return false;
         }
         for (size_t i = 0; i < out->code_count; ++i)
         {
-          if (!s_read_u32(f, &out->dbg_cols[i])) { free(idxs); return false; }
+          if (!s_read_u32(f, &out->dbg_cols[i])) return false;
         }
         out->dbg_capacity = out->code_count;
       }
@@ -841,12 +768,18 @@ bool mi_mx_load_file(MiVm* vm, const char* filename, MiMixProgram* out_program)
     return false;
   }
 
-  MiVmChunk** chunks = (MiVmChunk**)calloc((size_t)h.chunk_count, sizeof(MiVmChunk*));
-  uint32_t** subidx = (uint32_t**)calloc((size_t)h.chunk_count, sizeof(uint32_t*));
+  XArena* arena = x_arena_create(64u * 1024u);
+  if (!arena)
+  {
+    fclose(f);
+    return false;
+  }
+
+  MiVmChunk** chunks = (MiVmChunk**)x_arena_alloc_zero(arena, (size_t)h.chunk_count * sizeof(MiVmChunk*));
+  uint32_t** subidx = (uint32_t**)x_arena_alloc_zero(arena, (size_t)h.chunk_count * sizeof(uint32_t*));
   if (!chunks || !subidx)
   {
-    free(chunks);
-    free(subidx);
+    x_arena_destroy(arena);
     fclose(f);
     return false;
   }
@@ -854,13 +787,13 @@ bool mi_mx_load_file(MiVm* vm, const char* filename, MiMixProgram* out_program)
   bool ok = true;
   for (uint32_t i = 0; i < h.chunk_count; ++i)
   {
-    chunks[i] = (MiVmChunk*)calloc(1, sizeof(MiVmChunk));
+    chunks[i] = (MiVmChunk*)x_arena_alloc_zero(arena, sizeof(MiVmChunk));
     if (!chunks[i])
     {
       ok = false;
       break;
     }
-    if (!s_load_chunk(f, chunks[i], h.version, h.chunk_count, &subidx[i]))
+    if (!s_load_chunk(f, arena, chunks[i], h.version, h.chunk_count, &subidx[i]))
     {
       ok = false;
       break;
@@ -879,22 +812,13 @@ bool mi_mx_load_file(MiVm* vm, const char* filename, MiMixProgram* out_program)
       }
     }
 
-    // Resolve command fns by name.
+    // Resolve command callables by name (best-effort for qualified names).
     for (uint32_t i = 0; i < h.chunk_count; ++i)
     {
       MiVmChunk* c = chunks[i];
-      for (size_t j = 0; j < c->cmd_count; ++j)
+      if (!mi_vm_link_chunk_commands(vm, c))
       {
-        MiVmCommandFn fn = s_lookup_cmd_fn(vm, c->cmd_names[j]);
-        if (!fn)
-        {
-          ok = false;
-          break;
-        }
-        c->cmd_fns[j] = fn;
-      }
-      if (!ok)
-      {
+        ok = false;
         break;
       }
     }
@@ -904,27 +828,11 @@ bool mi_mx_load_file(MiVm* vm, const char* filename, MiMixProgram* out_program)
 
   if (!ok)
   {
-    // Cleanup partial
-    for (uint32_t i = 0; i < h.chunk_count; ++i)
-    {
-      if (subidx[i]) free(subidx[i]);
-      if (chunks[i])
-      {
-        s_free_chunk_payload(chunks[i]);
-        free(chunks[i]);
-      }
-    }
-    free(subidx);
-    free(chunks);
+    x_arena_destroy(arena);
     return false;
   }
 
-  for (uint32_t i = 0; i < h.chunk_count; ++i)
-  {
-    free(subidx[i]);
-  }
-  free(subidx);
-
+  out_program->arena = arena;
   out_program->chunks = chunks;
   out_program->chunk_count = h.chunk_count;
   out_program->entry = chunks[h.entry_chunk_index];
@@ -933,19 +841,14 @@ bool mi_mx_load_file(MiVm* vm, const char* filename, MiMixProgram* out_program)
 
 void mi_mx_program_destroy(MiMixProgram* p)
 {
-  if (!p || !p->chunks)
+  if (!p)
   {
     return;
   }
 
-  for (size_t i = 0; i < p->chunk_count; ++i)
+  if (p->arena)
   {
-    if (p->chunks[i])
-    {
-      s_free_chunk_payload(p->chunks[i]);
-      free(p->chunks[i]);
-    }
+    x_arena_destroy(p->arena);
   }
-  free(p->chunks);
   memset(p, 0, sizeof(*p));
 }

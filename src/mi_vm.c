@@ -10,8 +10,11 @@
 #include <stdint.h>
 #include <time.h>
 
-#include <stdx_strbuilder.h>
+#include <stdx_io.h>
 #include <stdx_filesystem.h>
+#include <stdx_strbuilder.h>
+
+static const char* s_vm_kind_name(MiRtValueKind kind);
 
 static XSlice s_vm_current_script_file(MiVm* vm)
 {
@@ -47,43 +50,20 @@ static void s_vm_print_source_context_from_file(XSlice file, uint32_t line, uint
     return;
   }
 
-  char path[1024];
-  size_t n = file.length;
-  if (n >= sizeof(path))
-  {
-    n = sizeof(path) - 1;
-  }
-  memcpy(path, file.ptr, n);
-  path[n] = '\0';
+  XFSPath path;
+  x_fs_path_set_slice(&path, file);
 
-  FILE* f = fopen(path, "rb");
-  if (!f)
+  char* src_ptr;
+  size_t src_size;
+
+  src_ptr = x_io_read_text(path.buf, &src_size);
+  if (!src_ptr)
   {
+    mi_error_fmt("Failed to read file '%s'", path.buf);
     return;
   }
 
-  /* Read whole file (small scripts). */
-  fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  if (sz <= 0 || sz > (long)(1024 * 1024 * 8))
-  {
-    fclose(f);
-    return;
-  }
-
-  char* buf = (char*)malloc((size_t)sz + 1u);
-  if (!buf)
-  {
-    fclose(f);
-    return;
-  }
-
-  size_t got = fread(buf, 1, (size_t)sz, f);
-  fclose(f);
-  buf[got] = '\0';
-
-  XSlice src = x_slice_init(buf, got);
+  XSlice src = x_slice_init(src_ptr, src_size);
 
   int cur_line = 1;
   size_t i = 0;
@@ -134,7 +114,7 @@ static void s_vm_print_source_context_from_file(XSlice file, uint32_t line, uint
     mi_error("^\n");
   }
 
-  free(buf);
+  free(src_ptr);
 }
 
 static void s_vm_report_error(MiVm* vm, const char* msg)
@@ -309,6 +289,112 @@ static bool s_slice_eq(const XSlice a, const XSlice b)
   return memcmp(a.ptr, b.ptr, a.length) == 0;
 }
 
+static const char* s_vm_type_name(MiTypeKind t)
+{
+  switch (t)
+  {
+    case MI_TYPE_VOID: return "void";
+    case MI_TYPE_BOOL: return "bool";
+    case MI_TYPE_INT: return "int";
+    case MI_TYPE_FLOAT: return "float";
+    case MI_TYPE_STRING: return "string";
+    case MI_TYPE_LIST: return "list";
+    case MI_TYPE_DICT: return "dict";
+    case MI_TYPE_BLOCK: return "block";
+    case MI_TYPE_FUNC: return "func";
+    case MI_TYPE_ANY: return "any";
+    default: return "unknown";
+  }
+}
+
+static bool s_vm_type_matches(MiTypeKind expected, const MiRtValue* v)
+{
+  if (expected == MI_TYPE_ANY)
+  {
+    return true;
+  }
+
+  switch (expected)
+  {
+    case MI_TYPE_VOID: return v->kind == MI_RT_VAL_VOID;
+    case MI_TYPE_BOOL: return v->kind == MI_RT_VAL_BOOL;
+    case MI_TYPE_INT: return v->kind == MI_RT_VAL_INT;
+    case MI_TYPE_FLOAT: return v->kind == MI_RT_VAL_FLOAT;
+    case MI_TYPE_STRING: return v->kind == MI_RT_VAL_STRING;
+    case MI_TYPE_LIST: return v->kind == MI_RT_VAL_LIST;
+    case MI_TYPE_DICT: return v->kind == MI_RT_VAL_DICT;
+    case MI_TYPE_BLOCK: return v->kind == MI_RT_VAL_BLOCK;
+    case MI_TYPE_FUNC: return v->kind == MI_RT_VAL_CMD;
+    default: return false;
+  }
+}
+
+static bool s_vm_check_sig(MiVm* vm, const MiFuncTypeSig* sig, XSlice cmd_name, int argc, const MiRtValue* argv)
+{
+  (void)vm;
+  if (!sig)
+  {
+    return true;
+  }
+
+  if (!sig->is_variadic)
+  {
+    if (argc != sig->param_count)
+    {
+      mi_error_fmt("%.*s: expected %d args, got %d\n", (int)cmd_name.length, cmd_name.ptr, sig->param_count, argc);
+      return false;
+    }
+  }
+  else
+  {
+    if (argc < sig->param_count)
+    {
+      mi_error_fmt("%.*s: expected at least %d args, got %d\n", (int)cmd_name.length, cmd_name.ptr, sig->param_count, argc);
+      return false;
+    }
+  }
+
+  /* Fixed params. */
+  for (int i = 0; i < sig->param_count && i < argc; ++i)
+  {
+    MiTypeKind expected = sig->param_types ? sig->param_types[i] : MI_TYPE_ANY;
+    if (!s_vm_type_matches(expected, &argv[i]))
+    {
+      mi_error_fmt("%.*s: arg %d expected %s, got %s\n",
+          (int)cmd_name.length,
+          cmd_name.ptr,
+          i,
+          s_vm_type_name(expected),
+          s_vm_kind_name(argv[i].kind));
+      return false;
+    }
+  }
+
+  /* Variadic tail. */
+  if (sig->is_variadic && argc > sig->param_count)
+  {
+    MiTypeKind vt = sig->variadic_type;
+    if (vt != MI_TYPE_ANY)
+    {
+      for (int i = sig->param_count; i < argc; ++i)
+      {
+        if (!s_vm_type_matches(vt, &argv[i]))
+        {
+          mi_error_fmt("%.*s: arg %d expected %s, got %s\n",
+              (int)cmd_name.length,
+              cmd_name.ptr,
+              i,
+              s_vm_type_name(vt),
+              s_vm_kind_name(argv[i].kind));
+          return false;
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
 //----------------------------------------------------------
 // VM builtins (minimal starter set)
 //----------------------------------------------------------
@@ -475,9 +561,9 @@ static void s_vm_value_to_string(char* out, size_t cap, const MiRtValue* v)
   }
 }
 
-static MiRtValue s_vm_cmd_dict(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_dict(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
-  (void)name;
+  (void)user;
   if (!vm || !vm->rt)
   {
     return mi_rt_make_void();
@@ -525,10 +611,10 @@ static MiRtValue s_vm_cmd_dict(MiVm* vm, XSlice name, int argc, const MiRtValue*
   return mi_rt_make_void();
 }
 
-static MiRtValue s_vm_cmd_list(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_list(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
   (void)vm;
-  (void)name;
+  (void)user;
 
   if (argc != 1)
   {
@@ -545,14 +631,14 @@ static MiRtValue s_vm_cmd_list(MiVm* vm, XSlice name, int argc, const MiRtValue*
   return argv[0];
 }
 
-static MiRtValue s_vm_cmd_len(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_len(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
   if (!vm || !vm->rt)
   {
     return mi_rt_make_void();
   }
 
-  (void)name;
+  (void)user;
 
   if (argc != 1)
   {
@@ -608,10 +694,10 @@ static bool s_vm_is_truthy(const MiRtValue* v)
   }
 }
 
-static MiRtValue s_vm_cmd_warning(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_warning(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
   (void)vm;
-  (void)name;
+  (void)user;
 
   XStrBuilder* sb = x_strbuilder_create();
   if (!sb)
@@ -638,10 +724,10 @@ static MiRtValue s_vm_cmd_warning(MiVm* vm, XSlice name, int argc, const MiRtVal
   return mi_rt_make_void();
 }
 
-static MiRtValue s_vm_cmd_error(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_error(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
   (void)vm;
-  (void)name;
+  (void)user;
 
   XStrBuilder* sb = x_strbuilder_create();
   if (!sb)
@@ -668,19 +754,19 @@ static MiRtValue s_vm_cmd_error(MiVm* vm, XSlice name, int argc, const MiRtValue
   return mi_rt_make_void();
 }
 
-static MiRtValue s_vm_cmd_fatal(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_fatal(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
   (void)vm;
-  (void)name;
+  (void)user;
 
-  (void)s_vm_cmd_error(vm, name, argc, argv);
+  (void)s_vm_cmd_error(vm, NULL, argc, argv);
   exit(1);
 }
 
-static MiRtValue s_vm_cmd_assert(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_assert(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
   (void)vm;
-  (void)name;
+  (void)user;
 
   if (argc < 1 || argc > 2)
   {
@@ -701,11 +787,11 @@ static MiRtValue s_vm_cmd_assert(MiVm* vm, XSlice name, int argc, const MiRtValu
       MiRtValue one;
       one.kind = MI_RT_VAL_STRING;
       one.as.s = argv[1].as.s;
-      (void)s_vm_cmd_fatal(vm, name, 1, &one);
+      (void)s_vm_cmd_fatal(vm, NULL, 1, &one);
     }
     else
     {
-      (void)s_vm_cmd_fatal(vm, name, 1, &argv[1]);
+      (void)s_vm_cmd_fatal(vm, NULL, 1, &argv[1]);
     }
   }
 
@@ -713,10 +799,10 @@ static MiRtValue s_vm_cmd_assert(MiVm* vm, XSlice name, int argc, const MiRtValu
   exit(1);
 }
 
-static MiRtValue s_vm_cmd_type(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_type(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
   (void)vm;
-  (void)name;
+  (void)user;
 
   if (argc != 1)
   {
@@ -768,10 +854,10 @@ static MiRtValue s_vm_cmd_type(MiVm* vm, XSlice name, int argc, const MiRtValue*
   return mi_rt_make_void();
 }
 
-static MiRtValue s_vm_cmd_typeof(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_typeof(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
   (void)vm;
-  (void)name;
+  (void)user;
 
   if (argc != 1)
   {
@@ -782,10 +868,10 @@ static MiRtValue s_vm_cmd_typeof(MiVm* vm, XSlice name, int argc, const MiRtValu
   return mi_rt_make_type(argv[0].kind);
 }
 
-static MiRtValue s_vm_cmd_print(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_print(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
   (void) vm;
-  (void) name;
+  (void) user;
 
   for (int i = 0; i < argc; ++i)
   {
@@ -881,9 +967,9 @@ static void s_vm_trace_print(MiVm* vm)
   }
 }
 
-static MiRtValue s_vm_cmd_trace(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_trace(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
-  (void)name;
+  (void)user;
   (void)argv;
 
   if (argc != 0)
@@ -896,9 +982,119 @@ static MiRtValue s_vm_cmd_trace(MiVm* vm, XSlice name, int argc, const MiRtValue
   return mi_rt_make_void();
 }
 
-static MiRtValue s_vm_cmd_set(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_argc(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
-  (void)name;
+  (void)user;
+  (void)argv;
+  if (!vm)
+  {
+    return mi_rt_make_int(0);
+  }
+  if (argc != 0)
+  {
+    mi_error("argc: expected 0 arguments\n");
+    return mi_rt_make_int(0);
+  }
+  return mi_rt_make_int((int64_t)vm->cur_argc);
+}
+
+static MiRtValue s_vm_cmd_arg(MiVm* vm, void* user, int argc, const MiRtValue* argv)
+{
+  (void)user;
+  if (!vm)
+  {
+    return mi_rt_make_void();
+  }
+  if (argc != 1 || argv[0].kind != MI_RT_VAL_INT)
+  {
+    mi_error("arg: expected 1 int argument\n");
+    return mi_rt_make_void();
+  }
+  int64_t i = argv[0].as.i;
+  if (i < 0 || i >= (int64_t)vm->cur_argc)
+  {
+    return mi_rt_make_void();
+  }
+  return vm->cur_argv ? vm->cur_argv[i] : mi_rt_make_void();
+}
+
+static MiRtValue s_vm_cmd_arg_type(MiVm* vm, void* user, int argc, const MiRtValue* argv)
+{
+  (void)user;
+  if (!vm)
+  {
+    return mi_rt_make_type(MI_TYPE_VOID);
+  }
+  if (argc != 1 || argv[0].kind != MI_RT_VAL_INT)
+  {
+    mi_error("arg_type: expected 1 int argument\n");
+    return mi_rt_make_type(MI_TYPE_VOID);
+  }
+  int64_t i = argv[0].as.i;
+  if (i < 0 || i >= (int64_t)vm->cur_argc)
+  {
+    return mi_rt_make_type(MI_TYPE_VOID);
+  }
+  MiRtValue v0 = vm->cur_argv ? vm->cur_argv[i] : mi_rt_make_void();
+  /* Map runtime kind to type kind (approximate). */
+  switch (v0.kind)
+  {
+    case MI_RT_VAL_VOID:   return mi_rt_make_type(MI_TYPE_VOID);
+    case MI_RT_VAL_INT:    return mi_rt_make_type(MI_TYPE_INT);
+    case MI_RT_VAL_FLOAT:  return mi_rt_make_type(MI_TYPE_FLOAT);
+    case MI_RT_VAL_BOOL:   return mi_rt_make_type(MI_TYPE_BOOL);
+    case MI_RT_VAL_STRING: return mi_rt_make_type(MI_TYPE_STRING);
+    case MI_RT_VAL_LIST:   return mi_rt_make_type(MI_TYPE_LIST);
+    case MI_RT_VAL_DICT:   return mi_rt_make_type(MI_TYPE_DICT);
+    case MI_RT_VAL_BLOCK:  return mi_rt_make_type(MI_TYPE_BLOCK);
+    case MI_RT_VAL_CMD:    return mi_rt_make_type(MI_TYPE_FUNC);
+    case MI_RT_VAL_PAIR:   return mi_rt_make_type(MI_TYPE_ANY);
+    case MI_RT_VAL_KVREF:  return mi_rt_make_type(MI_TYPE_ANY);
+    case MI_RT_VAL_TYPE:   return mi_rt_make_type(MI_TYPE_ANY);
+    default:               return mi_rt_make_type(MI_TYPE_ANY);
+  }
+}
+
+static MiRtValue s_vm_cmd_arg_name(MiVm* vm, void* user, int argc, const MiRtValue* argv)
+{
+  (void)user;
+  if (!vm || !vm->cur_cmd)
+  {
+    return mi_rt_make_string_slice(x_slice_init("", 0));
+  }
+  if (argc != 1 || argv[0].kind != MI_RT_VAL_INT)
+  {
+    mi_error("arg_name: expected 1 int argument\n");
+    return mi_rt_make_string_slice(x_slice_init("", 0));
+  }
+  int64_t i = argv[0].as.i;
+  if (i < 0 || i >= (int64_t)vm->cur_argc)
+  {
+    return mi_rt_make_string_slice(x_slice_init("", 0));
+  }
+
+  uint32_t fixed = vm->cur_cmd->param_count;
+  if (vm->cur_cmd->sig)
+  {
+    fixed = (uint32_t)vm->cur_cmd->sig->param_count;
+  }
+
+  if ((uint32_t)i < fixed)
+  {
+    if (vm->cur_cmd->param_names && (uint32_t)i < vm->cur_cmd->param_count)
+    {
+      return mi_rt_make_string_slice(vm->cur_cmd->param_names[(uint32_t)i]);
+    }
+    return mi_rt_make_string_slice(x_slice_init("", 0));
+  }
+
+  /* Variadic tail has no real name; return '...' as a sentinel. */
+  return mi_rt_make_string_slice(x_slice_init("...", 3));
+}
+
+static MiRtValue s_vm_cmd_set(MiVm* vm, void* user, int argc, const MiRtValue* argv)
+{
+  (void)user;
   if (!vm || !vm->rt)
   {
     return mi_rt_make_void();
@@ -920,9 +1116,9 @@ static MiRtValue s_vm_cmd_set(MiVm* vm, XSlice name, int argc, const MiRtValue* 
   return argv[1];
 }
 
-static MiRtValue s_vm_cmd_call(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_call(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
-  (void)name;
+  (void)user;
   if (argc != 1)
   {
     mi_error("call: expected 1 argument\n");
@@ -948,13 +1144,29 @@ static MiRtValue s_vm_exec_cmd_value(MiVm* vm, XSlice cmd_name, MiRtValue cmd_va
 
   if (c->is_native)
   {
-    if (!c->native_fn)
+    /* Enforce declared signature when available.
+       Native host commands are expected to provide one.
+       Legacy builtins may still have sig == NULL. */
+    if (c->sig)
     {
-      mi_error("mi_vm: native cmd missing function pointer\n");
-      return mi_rt_make_void();
+      if (!s_vm_check_sig(vm, c->sig, cmd_name, argc, argv))
+      {
+        return mi_rt_make_void();
+      }
     }
 
-    return c->native_fn(vm, cmd_name, argc, argv);
+    if (c->native_fn2)
+    {
+      return c->native_fn2(vm, c->native_user, argc, argv);
+    }
+
+    if (c->native_fn)
+    {
+      return c->native_fn(vm, cmd_name, argc, argv);
+    }
+
+    mi_error("mi_vm: native cmd missing function pointer\n");
+    return mi_rt_make_void();
   }
 
   if (c->body.kind != MI_RT_VAL_BLOCK || !c->body.as.block || c->body.as.block->kind != MI_RT_BLOCK_VM_CHUNK)
@@ -963,10 +1175,21 @@ static MiRtValue s_vm_exec_cmd_value(MiVm* vm, XSlice cmd_name, MiRtValue cmd_va
     return mi_rt_make_void();
   }
 
-  if ((uint32_t)argc != c->param_count)
+  /* Enforce declared signature when available. */
+  if (c->sig)
   {
-    mi_error_fmt("%.*s: expected %u args, got %d\n", (int)cmd_name.length, cmd_name.ptr, (unsigned)c->param_count, argc);
-    return mi_rt_make_void();
+    if (!s_vm_check_sig(vm, c->sig, cmd_name, argc, argv))
+    {
+      return mi_rt_make_void();
+    }
+  }
+  else
+  {
+    if ((uint32_t)argc != c->param_count)
+    {
+      mi_error_fmt("%.*s: expected %u args, got %d\n", (int)cmd_name.length, cmd_name.ptr, (unsigned)c->param_count, argc);
+      return mi_rt_make_void();
+    }
   }
 
   MiRtBlock* b = c->body.as.block;
@@ -1066,9 +1289,9 @@ static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value, const Mi
    This is emitted by the compiler as a special form so it does not need to build
    a list/dict at runtime for parameters.
    */
-static MiRtValue s_vm_cmd_cmd(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_cmd(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
-  (void)name;
+  (void)user;
   if (!vm || !vm->rt)
   {
     return mi_rt_make_void();
@@ -1087,23 +1310,38 @@ static MiRtValue s_vm_cmd_cmd(MiVm* vm, XSlice name, int argc, const MiRtValue* 
   }
 
   MiRtValue body = argv[argc - 1];
+
+  /* Optional typed signature (emitted by 'func' frontend): cmd(name, p1..pN, sig_list, block). */
+  MiRtValue sig_arg = mi_rt_make_void();
+  bool has_sig = false;
+  if (argc >= 3 && argv[argc - 2].kind == MI_RT_VAL_LIST && argv[argc - 2].as.list)
+  {
+    sig_arg = argv[argc - 2];
+    has_sig = true;
+  }
+
   if (body.kind != MI_RT_VAL_BLOCK)
   {
     mi_error("cmd: last argument must be a block\n");
     return mi_rt_make_void();
   }
 
-  uint32_t param_count = (argc > 2) ? (uint32_t)(argc - 2) : 0u;
+  uint32_t param_count = 0u;
+  if (argc > 2)
+  {
+    param_count = has_sig ? (uint32_t)(argc - 3) : (uint32_t)(argc - 2);
+  }
   XSlice* param_names = NULL;
+  XSlice  param_names_local[MI_VM_ARG_STACK_COUNT];
   if (param_count > 0)
   {
-    param_names = (XSlice*)calloc(param_count, sizeof(*param_names));
-    if (!param_names)
+    if (param_count > (uint32_t)(sizeof(param_names_local) / sizeof(param_names_local[0])))
     {
-      free(param_names);
-      mi_error("cmd: out of memory\n");
+      mi_error("cmd: too many parameters\n");
       return mi_rt_make_void();
     }
+    param_names = param_names_local;
+    memset(param_names, 0, (size_t)param_count * sizeof(*param_names));
   }
 
   for (uint32_t i = 0; i < param_count; ++i)
@@ -1112,7 +1350,6 @@ static MiRtValue s_vm_cmd_cmd(MiVm* vm, XSlice name, int argc, const MiRtValue* 
     if (pn.kind != MI_RT_VAL_STRING)
     {
       mi_error("cmd: parameter name must be string\n");
-      free(param_names);
       return mi_rt_make_void();
     }
 
@@ -1120,11 +1357,93 @@ static MiRtValue s_vm_cmd_cmd(MiVm* vm, XSlice name, int argc, const MiRtValue* 
   }
 
   MiRtCmd* c = mi_rt_cmd_create(vm->rt, param_count, param_names, body);
-  free(param_names);
   if (!c)
   {
     mi_error("cmd: out of memory\n");
     return mi_rt_make_void();
+  }
+
+  /* Attach signature metadata if provided. */
+  if (has_sig)
+  {
+    MiRtList* lst = sig_arg.as.list;
+    if (!lst || lst->count < 3u)
+    {
+      mi_error("cmd: invalid signature list\n");
+      return mi_rt_make_void();
+    }
+
+    /* Format: [ret_type, fixed_count, t0..tN-1, variadic_type_or_-1] */
+    MiRtValue v_ret = lst->items[0];
+    MiRtValue v_fixed = lst->items[1];
+    MiRtValue v_var = lst->items[lst->count - 1];
+    if (v_ret.kind != MI_RT_VAL_INT || v_fixed.kind != MI_RT_VAL_INT || v_var.kind != MI_RT_VAL_INT)
+    {
+      mi_error("cmd: signature list must contain ints\n");
+      return mi_rt_make_void();
+    }
+
+    int fixed_count = (int)v_fixed.as.i;
+    if (fixed_count < 0)
+    {
+      mi_error("cmd: invalid fixed_count in signature\n");
+      return mi_rt_make_void();
+    }
+
+    size_t expected_count = (size_t)(2 + fixed_count + 1);
+    if (lst->count != expected_count)
+    {
+      mi_error_fmt("cmd: signature list wrong size (expected %u, got %u)\n", (unsigned)expected_count, (unsigned)lst->count);
+      return mi_rt_make_void();
+    }
+
+    if ((uint32_t)fixed_count != param_count)
+    {
+      mi_error("cmd: signature fixed_count must match parameter name count\n");
+      return mi_rt_make_void();
+    }
+
+    MiFuncTypeSig* sig = (MiFuncTypeSig*)x_arena_alloc_zero(vm->perm_arena, sizeof(MiFuncTypeSig));
+    if (!sig)
+    {
+      mi_error("cmd: out of memory\n");
+      return mi_rt_make_void();
+    }
+
+    sig->ret_type = (MiTypeKind)v_ret.as.i;
+    sig->param_count = fixed_count;
+    sig->param_types = NULL;
+    sig->is_variadic = false;
+    sig->variadic_type = MI_TYPE_ANY;
+
+    if (fixed_count > 0)
+    {
+      sig->param_types = (MiTypeKind*)x_arena_alloc(vm->perm_arena, sizeof(MiTypeKind) * (size_t)fixed_count);
+      if (!sig->param_types)
+      {
+        mi_error("cmd: out of memory\n");
+        return mi_rt_make_void();
+      }
+      for (int i = 0; i < fixed_count; ++i)
+      {
+        MiRtValue vt = lst->items[2 + (size_t)i];
+        if (vt.kind != MI_RT_VAL_INT)
+        {
+          mi_error("cmd: signature param types must be ints\n");
+          return mi_rt_make_void();
+        }
+        sig->param_types[i] = (MiTypeKind)vt.as.i;
+      }
+    }
+
+    int64_t var_kind = v_var.as.i;
+    if (var_kind >= 0)
+    {
+      sig->is_variadic = true;
+      sig->variadic_type = (MiTypeKind)var_kind;
+    }
+
+    c->sig = sig;
   }
 
   /* Store command object in the current scope. */
@@ -1166,6 +1485,79 @@ static bool s_slice_find_double_colon(XSlice s, size_t start, size_t* out_index)
       return true;
     }
   }
+  return false;
+}
+
+static bool s_slice_has_double_colon(XSlice s)
+{
+  return s_slice_find_double_colon(s, 0u, NULL);
+}
+
+static bool s_vm_resolve_qualified_cmd(MiVm* vm, XSlice full_name, MiRtCmd** out_cmd)
+{
+  if (out_cmd)
+  {
+    *out_cmd = NULL;
+  }
+  if (!vm || !vm->rt)
+  {
+    return false;
+  }
+
+  size_t i0 = 0u;
+  size_t dc = 0u;
+  if (!s_slice_find_double_colon(full_name, 0u, &dc))
+  {
+    return false;
+  }
+
+  /* Resolve first segment from current scope chain. */
+  XSlice seg = { full_name.ptr, dc };
+  MiRtValue cur = mi_rt_make_void();
+  if (!mi_rt_var_get(vm->rt, seg, &cur))
+  {
+    return false;
+  }
+
+  /* Walk remaining segments inside chunk environments. */
+  i0 = dc + 2u;
+  while (i0 < full_name.length)
+  {
+    size_t next_dc = 0u;
+    bool has_next = s_slice_find_double_colon(full_name, i0, &next_dc);
+    size_t seg_len = has_next ? (next_dc - i0) : (full_name.length - i0);
+    XSlice name = { (const char*)full_name.ptr + i0, seg_len };
+
+    if (cur.kind != MI_RT_VAL_BLOCK || !cur.as.block || !cur.as.block->env)
+    {
+      return false;
+    }
+
+    MiRtValue v = mi_rt_make_void();
+    if (!mi_rt_var_get_from(cur.as.block->env, name, &v))
+    {
+      return false;
+    }
+
+    if (!has_next)
+    {
+      if (v.kind != MI_RT_VAL_CMD || !v.as.cmd)
+      {
+        return false;
+      }
+      if (out_cmd)
+      {
+        *out_cmd = v.as.cmd;
+      }
+      return true;
+    }
+
+    /* Continue chaining through nested chunks. */
+    cur = v;
+    seg = name;
+    i0 = next_dc + 2u;
+  }
+
   return false;
 }
 
@@ -1241,6 +1633,56 @@ static MiRtValue s_vm_exec_qualified_cmd(MiVm* vm, XSlice full_name, int argc, c
   return mi_rt_make_void();
 }
 
+bool mi_vm_link_chunk_commands(MiVm* vm, MiVmChunk* chunk)
+{
+  if (!vm || !vm->rt || !chunk)
+  {
+    return false;
+  }
+
+  if (!chunk->cmd_names || !chunk->cmd_targets)
+  {
+    return true;
+  }
+
+  for (size_t i = 0; i < chunk->cmd_count; ++i)
+  {
+    if (chunk->cmd_targets[i])
+    {
+      continue;
+    }
+
+    XSlice name = chunk->cmd_names[i];
+
+    /* Qualified names may not be available yet (e.g. util defined after include:).
+       Leave them unresolved for lazy caching at first call. */
+    if (s_slice_has_double_colon(name))
+    {
+      MiRtCmd* cmd = NULL;
+      if (s_vm_resolve_qualified_cmd(vm, name, &cmd) && cmd)
+      {
+        chunk->cmd_targets[i] = cmd;
+      }
+      continue;
+    }
+
+    MiRtValue cmd_v = mi_rt_make_void();
+    if (!mi_vm_find_command(vm, name, &cmd_v))
+    {
+      return false;
+    }
+    if (cmd_v.kind != MI_RT_VAL_CMD || !cmd_v.as.cmd)
+    {
+      mi_rt_value_release(vm->rt, cmd_v);
+      return false;
+    }
+    chunk->cmd_targets[i] = cmd_v.as.cmd;
+    mi_rt_value_release(vm->rt, cmd_v);
+  }
+
+  return true;
+}
+
 //----------------------------------------------------------
 // include: cache helpers
 //----------------------------------------------------------
@@ -1270,14 +1712,14 @@ static void s_hex_u64(char out[17], uint64_t v)
   out[16] = 0;
 }
 
-static char* s_strdup(const char* s)
+static char* s_strdup_arena(XArena* arena, const char* s)
 {
-  if (!s)
+  if (!arena || !s)
   {
     return NULL;
   }
   size_t n = strlen(s);
-  char* p = (char*)malloc(n + 1u);
+  char* p = (char*)x_arena_alloc(arena, n + 1u);
   if (!p)
   {
     return NULL;
@@ -1373,16 +1815,21 @@ static void s_vm_module_cache_set(MiVm* vm, const char* key, MiRtValue value)
     vm->module_cache_capacity = new_cap;
   }
 
-  vm->module_cache[vm->module_cache_count].key = s_strdup(key);
+  vm->module_cache[vm->module_cache_count].key = s_strdup_arena(vm->perm_arena, key);
   vm->module_cache[vm->module_cache_count].value = value;
   vm->module_cache_count += 1u;
 }
 
-static char* s_read_text_file(const char* path, size_t* out_len)
+static char* s_read_text_file_arena(XArena* arena, const char* path, size_t* out_len)
 {
   if (out_len)
   {
     *out_len = 0;
+  }
+
+  if (!arena)
+  {
+    return NULL;
   }
 
   FILE* f = fopen(path, "rb");
@@ -1410,7 +1857,7 @@ static char* s_read_text_file(const char* path, size_t* out_len)
     return NULL;
   }
 
-  char* buf = (char*)malloc((size_t)sz + 1u);
+  char* buf = (char*)x_arena_alloc(arena, (size_t)sz + 1u);
   if (!buf)
   {
     fclose(f);
@@ -1421,7 +1868,6 @@ static char* s_read_text_file(const char* path, size_t* out_len)
   fclose(f);
   if (rd != (size_t)sz)
   {
-    free(buf);
     return NULL;
   }
   buf[rd] = 0;
@@ -1435,19 +1881,19 @@ static char* s_read_text_file(const char* path, size_t* out_len)
 
 static bool s_compile_mi_to_mx(MiVm* vm, const char* mi_file, const char* mx_file)
 {
-  size_t src_len = 0;
-  char* src = s_read_text_file(mi_file, &src_len);
-  if (!src)
-  {
-    mi_error_fmt("include: failed to read: %s\n", mi_file);
-    return false;
-  }
-
   XArena* arena = x_arena_create(1024 * 64);
   if (!arena)
   {
     mi_error("include: failed to create parser arena\n");
-    free(src);
+    return false;
+  }
+
+  size_t src_len = 0;
+  char* src = s_read_text_file_arena(arena, mi_file, &src_len);
+  if (!src)
+  {
+    mi_error_fmt("include: failed to read: %s\n", mi_file);
+    x_arena_destroy(arena);
     return false;
   }
 
@@ -1456,13 +1902,11 @@ static bool s_compile_mi_to_mx(MiVm* vm, const char* mi_file, const char* mx_fil
   {
     mi_parse_print_error(x_slice_init(src, src_len), &res);
     x_arena_destroy(arena);
-    free(src);
     return false;
   }
 
   MiVmChunk* ch = mi_compile_vm_script_ex(vm, res.script, x_slice_from_cstr("<module>"), x_slice_from_cstr(mi_file));
   x_arena_destroy(arena);
-  free(src);
   if (!ch)
   {
     mi_error_fmt("include: compilation failed: %s\n", mi_file);
@@ -1528,9 +1972,9 @@ static bool s_vm_get_cache_root(MiVm* vm, XFSPath* out_root)
   return true;
 }
 
-static MiRtValue s_vm_cmd_include(MiVm* vm, XSlice name, int argc, const MiRtValue* argv)
+static MiRtValue s_vm_cmd_include(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
-  (void)name;
+  (void)user;
   if (!vm || !vm->rt)
   {
     return mi_rt_make_void();
@@ -1751,6 +2195,13 @@ void mi_vm_init(MiVm* vm, MiRuntime* rt)
 {
   memset(vm, 0, sizeof(*vm));
   vm->rt = rt;
+
+  vm->perm_arena = x_arena_create(1024 * 64);
+  if (!vm->perm_arena)
+  {
+    mi_error("mi_vm: failed to create arena\n");
+    exit(1);
+  }
   vm->cache_dir_set = false;
   (void)x_fs_path_set(&vm->cache_dir, "");
   vm->arg_top = 0;
@@ -1774,37 +2225,136 @@ void mi_vm_init(MiVm* vm, MiRuntime* rt)
   vm->arg_frame_depth = 0;
 
   // Minimal builtins to get started.
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("print"), s_vm_cmd_print);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("warning"), s_vm_cmd_warning);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("error"),   s_vm_cmd_error);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("fatal"),   s_vm_cmd_fatal);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("assert"),  s_vm_cmd_assert);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("type"),    s_vm_cmd_type);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("t"),       s_vm_cmd_type);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("typeof"),  s_vm_cmd_typeof);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("set"),   s_vm_cmd_set);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("call"),  s_vm_cmd_call);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("list"),  s_vm_cmd_list);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("dict"),  s_vm_cmd_dict);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("len"),   s_vm_cmd_len);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("cmd"),   s_vm_cmd_cmd);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("include"), s_vm_cmd_include);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("import"),  s_vm_cmd_include);
-  (void) mi_vm_register_command(vm, x_slice_from_cstr("trace"), s_vm_cmd_trace);
+  // All native functions declare a type signature. The only intentional
+  // outlier is print(), which is variadic.
+  static MiFuncTypeSig s_sig_print = {0};
+  s_sig_print.ret_type = MI_TYPE_VOID;
+  s_sig_print.param_types = NULL;
+  s_sig_print.param_count = 0;
+  s_sig_print.is_variadic = true;
+  s_sig_print.variadic_type = MI_TYPE_ANY;
 
-  /* Expose built-in commands as first-class values in the root scope.
-     This enables: x = print; callback(..., print); etc. */
-  for (uint32_t i = 0; i < vm->command_count; ++i)
-  {
-    const MiVmCommandEntry* e = &vm->commands[i];
-    MiRtCmd* c = mi_rt_cmd_create_native(rt, e->fn);
-    if (c)
-    {
-      MiRtValue v = mi_rt_make_cmd(c);
-      (void) mi_rt_var_define(rt, e->name, v);
-      mi_rt_value_release(rt, v);
-    }
-  }
+  static MiFuncTypeSig s_sig_msg = {0};
+  s_sig_msg.ret_type = MI_TYPE_VOID;
+  s_sig_msg.param_types = NULL;
+  s_sig_msg.param_count = 0;
+  s_sig_msg.is_variadic = true;
+  s_sig_msg.variadic_type = MI_TYPE_ANY;
+
+  static MiTypeKind s_sig_set_params[] = { MI_TYPE_STRING, MI_TYPE_ANY };
+  static MiFuncTypeSig s_sig_set = {0};
+  s_sig_set.ret_type = MI_TYPE_ANY;
+  s_sig_set.param_types = s_sig_set_params;
+  s_sig_set.param_count = 2;
+
+  static MiTypeKind s_sig_call_params[] = { MI_TYPE_BLOCK };
+  static MiFuncTypeSig s_sig_call = {0};
+  s_sig_call.ret_type = MI_TYPE_ANY;
+  s_sig_call.param_types = s_sig_call_params;
+  s_sig_call.param_count = 1;
+
+  static MiTypeKind s_sig_list_params[] = { MI_TYPE_LIST };
+  static MiFuncTypeSig s_sig_list = {0};
+  s_sig_list.ret_type = MI_TYPE_LIST;
+  s_sig_list.param_types = s_sig_list_params;
+  s_sig_list.param_count = 1;
+
+  static MiTypeKind s_sig_dict_params[] = { MI_TYPE_ANY };
+  static MiFuncTypeSig s_sig_dict = {0};
+  s_sig_dict.ret_type = MI_TYPE_DICT;
+  s_sig_dict.param_types = s_sig_dict_params;
+  s_sig_dict.param_count = 1;
+
+  static MiTypeKind s_sig_len_params[] = { MI_TYPE_ANY };
+  static MiFuncTypeSig s_sig_len = {0};
+  s_sig_len.ret_type = MI_TYPE_INT;
+  s_sig_len.param_types = s_sig_len_params;
+  s_sig_len.param_count = 1;
+
+  static MiTypeKind s_sig_type_params[] = { MI_TYPE_STRING };
+  static MiFuncTypeSig s_sig_type = {0};
+  s_sig_type.ret_type = MI_TYPE_ANY;
+  s_sig_type.param_types = s_sig_type_params;
+  s_sig_type.param_count = 1;
+
+  static MiTypeKind s_sig_typeof_params[] = { MI_TYPE_ANY };
+  static MiFuncTypeSig s_sig_typeof = {0};
+  s_sig_typeof.ret_type = MI_TYPE_ANY;
+  s_sig_typeof.param_types = s_sig_typeof_params;
+  s_sig_typeof.param_count = 1;
+
+  static MiTypeKind s_sig_include_params[] = { MI_TYPE_STRING };
+  static MiFuncTypeSig s_sig_include = {0};
+  s_sig_include.ret_type = MI_TYPE_BLOCK;
+  s_sig_include.param_types = s_sig_include_params;
+  s_sig_include.param_count = 1;
+
+  static MiFuncTypeSig s_sig_trace = {0};
+  s_sig_trace.ret_type = MI_TYPE_VOID;
+  s_sig_trace.param_types = NULL;
+  s_sig_trace.param_count = 0;
+
+  static MiFuncTypeSig s_sig_argc = {0};
+  s_sig_argc.ret_type = MI_TYPE_INT;
+  s_sig_argc.param_types = NULL;
+  s_sig_argc.param_count = 0;
+
+  static MiTypeKind s_sig_arg_params[] = { MI_TYPE_INT };
+  static MiFuncTypeSig s_sig_arg = {0};
+  s_sig_arg.ret_type = MI_TYPE_ANY;
+  s_sig_arg.param_types = s_sig_arg_params;
+  s_sig_arg.param_count = 1;
+
+  static MiTypeKind s_sig_arg_type_params[] = { MI_TYPE_INT };
+  static MiFuncTypeSig s_sig_arg_type = {0};
+  s_sig_arg_type.ret_type = MI_TYPE_ANY;
+  s_sig_arg_type.param_types = s_sig_arg_type_params;
+  s_sig_arg_type.param_count = 1;
+
+  static MiTypeKind s_sig_arg_name_params[] = { MI_TYPE_INT };
+  static MiFuncTypeSig s_sig_arg_name = {0};
+  s_sig_arg_name.ret_type = MI_TYPE_STRING;
+  s_sig_arg_name.param_types = s_sig_arg_name_params;
+  s_sig_arg_name.param_count = 1;
+
+  static MiTypeKind s_sig_assert_params[] = { MI_TYPE_ANY };
+  static MiFuncTypeSig s_sig_assert = {0};
+  s_sig_assert.ret_type = MI_TYPE_VOID;
+  s_sig_assert.param_types = s_sig_assert_params;
+  s_sig_assert.param_count = 1;
+  s_sig_assert.is_variadic = true;
+  s_sig_assert.variadic_type = MI_TYPE_ANY;
+
+  static MiTypeKind s_sig_cmd_params[] = { MI_TYPE_STRING };
+  static MiFuncTypeSig s_sig_cmd = {0};
+  s_sig_cmd.ret_type = MI_TYPE_FUNC;
+  s_sig_cmd.param_types = s_sig_cmd_params;
+  s_sig_cmd.param_count = 1;
+  s_sig_cmd.is_variadic = true;
+  s_sig_cmd.variadic_type = MI_TYPE_ANY;
+
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("print"),   &s_sig_print,   s_vm_cmd_print,   NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("warning"), &s_sig_msg,     s_vm_cmd_warning, NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("error"),   &s_sig_msg,     s_vm_cmd_error,   NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("fatal"),   &s_sig_msg,     s_vm_cmd_fatal,   NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("assert"),  &s_sig_assert,  s_vm_cmd_assert,  NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("type"),    &s_sig_type,    s_vm_cmd_type,    NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("t"),       &s_sig_type,    s_vm_cmd_type,    NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("typeof"),  &s_sig_typeof,  s_vm_cmd_typeof,  NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("set"),     &s_sig_set,     s_vm_cmd_set,     NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("call"),    &s_sig_call,    s_vm_cmd_call,    NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("list"),    &s_sig_list,    s_vm_cmd_list,    NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("dict"),    &s_sig_dict,    s_vm_cmd_dict,    NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("len"),     &s_sig_len,     s_vm_cmd_len,     NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("cmd"),     &s_sig_cmd,     s_vm_cmd_cmd,     NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("include"), &s_sig_include, s_vm_cmd_include, NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("import"),  &s_sig_include, s_vm_cmd_include, NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("trace"),   &s_sig_trace,   s_vm_cmd_trace,   NULL, x_slice_init(NULL, 0));
+
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("argc"),     &s_sig_argc,     s_vm_cmd_argc,     NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("arg"),      &s_sig_arg,      s_vm_cmd_arg,      NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("arg_type"), &s_sig_arg_type, s_vm_cmd_arg_type, NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("arg_name"), &s_sig_arg_name, s_vm_cmd_arg_name, NULL, x_slice_init(NULL, 0));
 }
 
 void mi_vm_shutdown(MiVm* vm)
@@ -1821,7 +2371,15 @@ void mi_vm_shutdown(MiVm* vm)
   }
   s_vm_arg_clear(vm);
 
-  free(vm->commands);
+  if (vm->commands)
+  {
+    for (size_t i = 0; i < vm->command_count; ++i)
+    {
+      mi_rt_value_release(vm->rt, vm->commands[i].value);
+      vm->commands[i].value = mi_rt_make_void();
+    }
+    free(vm->commands);
+  }
   vm->commands = NULL;
   vm->command_count = 0;
   vm->command_capacity = 0;
@@ -1854,7 +2412,6 @@ void mi_vm_shutdown(MiVm* vm)
   {
     for (size_t i = 0; i < vm->module_cache_count; ++i)
     {
-      free(vm->module_cache[i].key);
       vm->module_cache[i].key = NULL;
       vm->module_cache[i].value = mi_rt_make_void();
     }
@@ -1863,6 +2420,12 @@ void mi_vm_shutdown(MiVm* vm)
   vm->module_cache = NULL;
   vm->module_cache_count = 0u;
   vm->module_cache_capacity = 0u;
+
+  if (vm->perm_arena)
+  {
+    x_arena_destroy(vm->perm_arena);
+    vm->perm_arena = NULL;
+  }
 }
 
 bool mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn)
@@ -1872,11 +2435,21 @@ bool mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn)
     return false;
   }
 
+  MiRtCmd* c = mi_rt_cmd_create_native(vm->rt, (MiRtNativeFn)fn);
+  if (!c)
+  {
+    return false;
+  }
+  MiRtValue v = mi_rt_make_cmd(c);
+
   for (size_t i = 0; i < vm->command_count; ++i)
   {
     if (s_slice_eq(vm->commands[i].name, name))
     {
-      vm->commands[i].fn = fn;
+      mi_rt_value_release(vm->rt, vm->commands[i].value);
+      vm->commands[i].value = v;
+      mi_rt_value_retain(vm->rt, v);
+      (void)mi_rt_var_set(vm->rt, name, v);
       return true;
     }
   }
@@ -1889,28 +2462,160 @@ bool mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn)
   }
 
   vm->commands[vm->command_count].name = name;
-  vm->commands[vm->command_count].fn = fn;
+  vm->commands[vm->command_count].value = v;
+  mi_rt_value_retain(vm->rt, v);
   vm->command_count++;
+  (void)mi_rt_var_define(vm->rt, name, v);
   return true;
 }
 
-MiVmCommandFn mi_vm_find_command_fn(MiVm* vm, XSlice name)
+static XSlice s_vm_perm_copy_slice(MiVm* vm, XSlice s)
+{
+  if (!vm || !vm->perm_arena || s.length == 0 || !s.ptr)
+  {
+    return x_slice_init(NULL, 0);
+  }
+
+  char* dst = (char*)x_arena_alloc(vm->perm_arena, s.length + 1);
+  if (!dst)
+  {
+    return x_slice_init(NULL, 0);
+  }
+
+  memcpy(dst, s.ptr, s.length);
+  dst[s.length] = '\0';
+  return x_slice_init(dst, s.length);
+}
+
+static const MiFuncTypeSig* s_vm_perm_copy_sig(MiVm* vm, const MiFuncTypeSig* sig)
+{
+  if (!vm || !vm->perm_arena || !sig)
+  {
+    return NULL;
+  }
+
+  MiFuncTypeSig* out = (MiFuncTypeSig*)x_arena_alloc_zero(vm->perm_arena, sizeof(MiFuncTypeSig));
+  if (!out)
+  {
+    return NULL;
+  }
+
+  *out = *sig;
+  if (sig->param_count > 0 && sig->param_types)
+  {
+    MiTypeKind* pts = (MiTypeKind*)x_arena_alloc(vm->perm_arena, (size_t)sig->param_count * sizeof(MiTypeKind));
+    if (!pts)
+    {
+      return NULL;
+    }
+    memcpy(pts, sig->param_types, (size_t)sig->param_count * sizeof(MiTypeKind));
+    out->param_types = pts;
+  }
+  else
+  {
+    out->param_types = NULL;
+  }
+
+  /* Tokens are front-end only; keep them zeroed in native declarations. */
+  out->func_tok = (MiToken){0};
+  out->lparen_tok = (MiToken){0};
+  out->rparen_tok = (MiToken){0};
+  out->ret_tok = (MiToken){0};
+
+  return out;
+}
+
+bool mi_vm_register_native(MiVm* vm, XSlice name, const MiFuncTypeSig* sig, MiVmNativeFn fn, void* user, XSlice doc)
+{
+  if (!vm || !vm->rt || !fn || !sig)
+  {
+    return false;
+  }
+
+  const MiFuncTypeSig* sig_copy = s_vm_perm_copy_sig(vm, sig);
+  if (!sig_copy)
+  {
+    return false;
+  }
+
+  XSlice doc_copy = s_vm_perm_copy_slice(vm, doc);
+
+  MiRtCmd* c = mi_rt_cmd_create_native2(vm->rt, (MiRtNativeFn2)fn, user, sig_copy, doc_copy);
+  if (!c)
+  {
+    return false;
+  }
+  MiRtValue v = mi_rt_make_cmd(c);
+
+  for (size_t i = 0; i < vm->command_count; ++i)
+  {
+    if (s_slice_eq(vm->commands[i].name, name))
+    {
+      mi_rt_value_release(vm->rt, vm->commands[i].value);
+      vm->commands[i].value = v;
+      mi_rt_value_retain(vm->rt, v);
+      (void)mi_rt_var_set(vm->rt, name, v);
+      return true;
+    }
+  }
+
+  if (vm->command_count == vm->command_capacity)
+  {
+    size_t new_cap = vm->command_capacity ? vm->command_capacity * 2u : 32u;
+    vm->commands = (MiVmCommandEntry*)s_realloc(vm->commands, new_cap * sizeof(*vm->commands));
+    vm->command_capacity = new_cap;
+  }
+
+  vm->commands[vm->command_count].name = name;
+  vm->commands[vm->command_count].value = v;
+  mi_rt_value_retain(vm->rt, v);
+  vm->command_count++;
+
+  (void)mi_rt_var_define(vm->rt, name, v);
+  return true;
+}
+
+bool mi_vm_find_command(MiVm* vm, XSlice name, MiRtValue* out_cmd)
 {
   if (!vm)
   {
-    return NULL;
+    return false;
   }
 
   for (size_t i = 0; i < vm->command_count; ++i)
   {
     if (s_slice_eq(vm->commands[i].name, name))
     {
-      return vm->commands[i].fn;
+      if (out_cmd)
+      {
+        *out_cmd = vm->commands[i].value;
+        mi_rt_value_retain(vm->rt, *out_cmd);
+      }
+      return true;
     }
   }
 
-  return NULL;
+  return false;
 }
+
+MiVmCommandFn mi_vm_find_command_fn(MiVm* vm, XSlice name)
+{
+  MiRtValue v = mi_rt_make_void();
+  if (!mi_vm_find_command(vm, name, &v))
+  {
+    return NULL;
+  }
+
+  MiVmCommandFn out = NULL;
+  if (v.kind == MI_RT_VAL_CMD && v.as.cmd && v.as.cmd->is_native && v.as.cmd->native_fn)
+  {
+    out = (MiVmCommandFn)v.as.cmd->native_fn;
+  }
+
+  mi_rt_value_release(vm->rt, v);
+  return out;
+}
+
 
 
 //----------------------------------------------------------
@@ -1993,7 +2698,7 @@ static void s_vm_chunk_destroy_ex(MiVmChunk* chunk, MiVmChunk** stack, size_t de
     free(chunk->symbol_ids);
   }
 
-  free(chunk->cmd_fns);
+  free(chunk->cmd_targets);
 
   if (chunk->cmd_names)
   {
@@ -2731,37 +3436,44 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
           XSlice cmd_name = chunk->cmd_names[ins.imm];
 
-          /* Qualified call: a::b(:) ... resolved through chunk environments. */
-          bool q_ok = false;
-          MiRtValue q_ret = s_vm_exec_qualified_cmd(vm, cmd_name, argc, argv, &q_ok);
-          if (q_ok)
+          bool is_qualified = s_slice_has_double_colon(cmd_name);
+
+          /* Scoped commands: a local var may shadow a builtin (unqualified only). */
+          if (!is_qualified)
           {
-            s_vm_reg_set(vm, ins.a, q_ret);
-            for (int i = 0; i < argc; i += 1)
+            MiRtValue scoped = mi_rt_make_void();
+            if (mi_rt_var_get(vm->rt, cmd_name, &scoped) && scoped.kind == MI_RT_VAL_CMD)
             {
-              mi_rt_value_release(vm->rt, argv[i]);
+              s_vm_reg_set(vm, ins.a, s_vm_exec_cmd_value(vm, cmd_name, scoped, argc, argv));
+              for (int i = 0; i < argc; i += 1)
+              {
+                mi_rt_value_release(vm->rt, argv[i]);
+              }
+              mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
+              break;
             }
-            mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
-            break;
           }
 
-          /* Scoped commands: a local var may shadow a builtin. */
-          MiRtValue scoped = mi_rt_make_void();
-          if (mi_rt_var_get(vm->rt, cmd_name, &scoped) && scoped.kind == MI_RT_VAL_CMD)
+          MiRtCmd* target = NULL;
+          if (chunk->cmd_targets && ins.imm >= 0 && (size_t)ins.imm < chunk->cmd_count)
           {
-            s_vm_reg_set(vm, ins.a, s_vm_exec_cmd_value(vm, cmd_name, scoped, argc, argv));
-            for (int i = 0; i < argc; i += 1)
+            target = chunk->cmd_targets[ins.imm];
+          }
+          if (!target && is_qualified)
+          {
+            /* Resolve qualified name lazily and cache it.
+               This avoids per-call qualified lookup; only the first call resolves. */
+            MiRtCmd* q = NULL;
+            if (s_vm_resolve_qualified_cmd(vm, cmd_name, &q) && q)
             {
-              mi_rt_value_release(vm->rt, argv[i]);
+              chunk->cmd_targets[ins.imm] = q;
+              target = q;
             }
-            mi_rt_value_assign(vm->rt, &last, vm->regs[ins.a]);
-            break;
           }
 
-          MiVmCommandFn fn = chunk->cmd_fns[ins.imm];
-          if (!fn)
+          if (!target)
           {
-            mi_error("mi_vm: CALL_CMD null function\n");
+            mi_error("mi_vm: CALL_CMD unresolved command\n");
             s_vm_reg_set(vm, ins.a, mi_rt_make_void());
             for (int i = 0; i < argc; i += 1)
             {
@@ -2769,7 +3481,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             }
             break;
           }
-          s_vm_reg_set(vm, ins.a, fn(vm, cmd_name, argc, argv));
+          s_vm_reg_set(vm, ins.a, s_vm_exec_cmd_value(vm, cmd_name, mi_rt_make_cmd(target), argc, argv));
           for (int i = 0; i < argc; i += 1)
           {
             mi_rt_value_release(vm->rt, argv[i]);
@@ -2812,10 +3524,10 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           }
 
           XSlice cmd_name = chunk->cmd_names[ins.imm];
-          MiVmCommandFn fn = chunk->cmd_fns[ins.imm];
-          if (!fn)
+          MiRtCmd* target = chunk->cmd_targets ? chunk->cmd_targets[ins.imm] : NULL;
+          if (!target)
           {
-            mi_error("mi_vm: CALL_CMD_FAST null function\n");
+            mi_error("mi_vm: CALL_CMD_FAST unresolved command\n");
             s_vm_reg_set(vm, ins.a, mi_rt_make_void());
             for (int i = 0; i < argc; i += 1)
             {
@@ -2824,7 +3536,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
             break;
           }
 
-          s_vm_reg_set(vm, ins.a, fn(vm, cmd_name, argc, argv));
+          s_vm_reg_set(vm, ins.a, s_vm_exec_cmd_value(vm, cmd_name, mi_rt_make_cmd(target), argc, argv));
           for (int i = 0; i < argc; i += 1)
           {
             mi_rt_value_release(vm->rt, argv[i]);
@@ -2923,8 +3635,8 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           }
           else
           {
-            MiVmCommandFn fn = mi_vm_find_command_fn(vm, head.as.s);
-            if (!fn)
+            MiRtValue global_cmd = mi_rt_make_void();
+            if (!mi_vm_find_command(vm, head.as.s, &global_cmd) || global_cmd.kind != MI_RT_VAL_CMD)
             {
               mi_error_fmt("mi_vm: unknown command: %.*s\n", (int)head.as.s.length, head.as.s.ptr);
               s_vm_reg_set(vm, ins.a, mi_rt_make_void());
@@ -2935,7 +3647,9 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
               break;
             }
 
-            s_vm_reg_set(vm, ins.a, fn(vm, head.as.s, argc, argv));
+            MiRtValue ret = s_vm_exec_cmd_value(vm, head.as.s, global_cmd, argc, argv);
+            mi_rt_value_release(vm->rt, global_cmd);
+            s_vm_reg_set(vm, ins.a, ret);
           }
 
           for (int i = 0; i < argc; i += 1)

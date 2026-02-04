@@ -1165,8 +1165,39 @@ MiRtCmd* mi_rt_cmd_create_native(MiRuntime* rt, MiRtNativeFn native_fn)
   c->is_native = true;
   c->param_count = 0u;
   c->param_names = NULL;
+  c->sig = NULL;
+  c->doc = x_slice_init(NULL, 0);
   c->body = mi_rt_make_void();
   c->native_fn = native_fn;
+  c->native_fn2 = NULL;
+  c->native_user = NULL;
+  return c;
+}
+
+MiRtCmd* mi_rt_cmd_create_native2(MiRuntime* rt, MiRtNativeFn2 native_fn2, void* user, const MiFuncTypeSig* sig, XSlice doc)
+{
+  if (!rt || !native_fn2)
+  {
+    return NULL;
+  }
+
+  MiRtCmd* c = (MiRtCmd*)mi_heap_alloc_obj(&rt->heap, MI_OBJ_CMD, sizeof(MiRtCmd));
+  if (!c)
+  {
+    mi_error("mi_runtime: out of memory\n");
+    exit(1);
+  }
+
+  memset(c, 0, sizeof(*c));
+  c->is_native = true;
+  c->param_count = 0u;
+  c->param_names = NULL;
+  c->sig = sig;
+  c->doc = doc;
+  c->body = mi_rt_make_void();
+  c->native_fn = NULL;
+  c->native_fn2 = native_fn2;
+  c->native_user = user;
   return c;
 }
 

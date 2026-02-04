@@ -57,6 +57,7 @@ typedef enum MiTokenKind
   MI_TOK_LTEQ,        // <=
   MI_TOK_GTEQ,        // >=
   MI_TOK_DOUBLE_COLON,// ::
+  MI_TOK_ELLIPSIS,    // ...
   MI_TOK_ERROR        // internal error token
 } MiTokenKind;
 
@@ -168,6 +169,9 @@ typedef struct MiFuncSig
   MiToken    ret_tok;
   MiTypeKind ret_type;
   MiFuncTypeSig* ret_func_sig;
+
+  bool       is_variadic;
+  MiTypeKind variadic_type;
 } MiFuncSig;
 
 typedef struct MiExpr

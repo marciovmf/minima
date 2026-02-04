@@ -281,7 +281,7 @@ static int32_t s_chunk_find_symbol(const MiVmChunk* c, XSlice name)
 
 /* Command lookup lives in the VM runtime. */
 
-static int32_t s_chunk_add_cmd_fn(MiVmChunk* c, XSlice name, MiVmCommandFn fn)
+static int32_t s_chunk_add_cmd_target(MiVmChunk* c, XSlice name, MiRtCmd* target)
 {
   for (size_t i = 0; i < c->cmd_count; ++i)
   {
@@ -294,13 +294,13 @@ static int32_t s_chunk_add_cmd_fn(MiVmChunk* c, XSlice name, MiVmCommandFn fn)
   if (c->cmd_count == c->cmd_capacity)
   {
     size_t new_cap = c->cmd_capacity ? c->cmd_capacity * 2u : 32u;
-    c->cmd_fns = (MiVmCommandFn*) s_realloc(c->cmd_fns, new_cap * sizeof(*c->cmd_fns));
+    c->cmd_targets = (MiRtCmd**) s_realloc(c->cmd_targets, new_cap * sizeof(*c->cmd_targets));
     c->cmd_names = (XSlice*) s_realloc(c->cmd_names, new_cap * sizeof(*c->cmd_names));
     c->cmd_capacity = new_cap;
   }
 
   int32_t idx = (int32_t) c->cmd_count;
-  c->cmd_fns[c->cmd_count] = fn;
+  c->cmd_targets[c->cmd_count] = target;
   c->cmd_names[c->cmd_count] = s_slice_dup_heap(name);
   c->cmd_count++;
   return idx;
@@ -708,10 +708,18 @@ argument is a block.
       goto cmd_special_form_done;
     }
 
-    MiVmCommandFn cmd_fn = mi_vm_find_command_fn(b->vm, x_slice_from_cstr("cmd"));
-    if (!cmd_fn)
+    MiRtValue cmd_v = mi_rt_make_void();
+    if (!mi_vm_find_command(b->vm, x_slice_from_cstr("cmd"), &cmd_v))
     {
       mi_error("cmd: builtin not registered\n");
+      int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
+      s_emit(b, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
+      return dst;
+    }
+    if (cmd_v.kind != MI_RT_VAL_CMD || !cmd_v.as.cmd)
+    {
+      mi_rt_value_release(b->vm->rt, cmd_v);
+      mi_error("cmd: builtin is not a command\n");
       int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
       s_emit(b, MI_VM_OP_LOAD_CONST, dst, 0, 0, k);
       return dst;
@@ -760,8 +768,9 @@ argument is a block.
     s_emit(b, MI_VM_OP_ARG_PUSH, body_reg, 0, 0, 0);
     argc += 1;
 
-    int32_t cmd_id = s_chunk_add_cmd_fn(b->chunk, x_slice_from_cstr("cmd"), cmd_fn);
+    int32_t cmd_id = s_chunk_add_cmd_target(b->chunk, x_slice_from_cstr("cmd"), cmd_v.as.cmd);
     s_emit(b, MI_VM_OP_CALL_CMD_FAST, dst, argc, 0, cmd_id);
+    mi_rt_value_release(b->vm->rt, cmd_v);
     return dst;
   }
 
@@ -1357,39 +1366,34 @@ must preserve the arg stack (ARG_SAVE/ARG_RESTORE). */
   if (head && head->kind == MI_EXPR_STRING_LITERAL)
   {
     XSlice name = head->as.string_lit.value;
-    MiVmCommandFn fn = mi_vm_find_command_fn(b->vm, name);
-    if (fn)
+    if (s_slice_has_double_colon(name))
     {
-      int32_t cmd_id = s_chunk_add_cmd_fn(b->chunk, name, fn);
-      if (s_slice_has_double_colon(name))
-      {
-        s_emit(b, MI_VM_OP_CALL_CMD, dst, argc, 0, cmd_id);
-      }
-      else
-      {
-        s_emit(b, MI_VM_OP_CALL_CMD_FAST, dst, argc, 0, cmd_id);
-      }
+      /* Qualified name: keep current behavior (resolved at runtime).
+         We'll add a fast-path for :: after command unification is stable. */
+      int32_t cmd_id = s_chunk_add_cmd_target(b->chunk, name, NULL);
+      s_emit(b, MI_VM_OP_CALL_CMD, dst, argc, 0, cmd_id);
     }
     else
     {
-      /* Late-bound identifier head.
-         For identifier calls like:
-           dispatch(10, 20, print)
-         we want call-by-value (dispatch is a variable containing a block/cmd).
-
-         This also supports patterns like:
-           foreach(n, list) { n(); }
-         where n holds a string name "foo"/"bar"; MI_VM_OP_CALL_CMD_DYN
-         will resolve strings when needed.
-
-         If the variable is not defined at runtime, this will error out,
-         and reflective call-by-name can still be expressed explicitly
-         by producing a string value and calling it indirectly.
-      */
-      uint8_t head_reg = s_alloc_reg(b);
-      int32_t sym = s_chunk_add_symbol(b->chunk, name);
-      s_emit(b, MI_VM_OP_LOAD_VAR, head_reg, 0, 0, sym);
-      s_emit(b, MI_VM_OP_CALL_CMD_DYN, dst, head_reg, argc, 0);
+      MiRtValue cmd_v = mi_rt_make_void();
+      if (mi_vm_find_command(b->vm, name, &cmd_v) && cmd_v.kind == MI_RT_VAL_CMD && cmd_v.as.cmd)
+      {
+        int32_t cmd_id = s_chunk_add_cmd_target(b->chunk, name, cmd_v.as.cmd);
+        s_emit(b, MI_VM_OP_CALL_CMD_FAST, dst, argc, 0, cmd_id);
+        mi_rt_value_release(b->vm->rt, cmd_v);
+      }
+      else
+      {
+        if (cmd_v.kind != MI_RT_VAL_VOID)
+        {
+          mi_rt_value_release(b->vm->rt, cmd_v);
+        }
+        /* Late-bound identifier head (call-by-value). */
+        uint8_t head_reg = s_alloc_reg(b);
+        int32_t sym = s_chunk_add_symbol(b->chunk, name);
+        s_emit(b, MI_VM_OP_LOAD_VAR, head_reg, 0, 0, sym);
+        s_emit(b, MI_VM_OP_CALL_CMD_DYN, dst, head_reg, argc, 0);
+      }
     }
 
     if (preserve_args)

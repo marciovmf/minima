@@ -235,6 +235,16 @@ static MiToken s_lexer_next(MiLexer* lx)
     case ']' : return s_make_token(MI_TOK_RBRACKET, start, 1, line, column);
     case ',' : return s_make_token(MI_TOK_COMMA, start, 1, line, column);
 
+
+    case '.' :
+               if (s_lexer_peek(lx) == '.' && s_lexer_peek_off(lx, 1) == '.')
+               {
+                 s_lexer_advance(lx);
+                 s_lexer_advance(lx);
+                 return s_make_token(MI_TOK_ELLIPSIS, start, 3, line, column);
+               }
+               return s_make_token(MI_TOK_ERROR, "Unexpected '.'", 13, line, column);
+
     case ':' :
                if (s_lexer_peek(lx) == ':')
                {
@@ -1076,6 +1086,8 @@ static MiCommand* s_parse_func_decl(MiParser* p)
   sig->param_count = 0;
   sig->ret_tok = func_tok;
   sig->ret_type = MI_TYPE_VOID;
+  sig->is_variadic = false;
+  sig->variadic_type = MI_TYPE_ANY;
 
   MiExprList* args = NULL;
   int argc = 0;
@@ -1091,6 +1103,32 @@ static MiCommand* s_parse_func_decl(MiParser* p)
   {
     for (;;)
     {
+      /* Variadic marker: ... or ...:Type (must be last). */
+      if (p->current.kind == MI_TOK_ELLIPSIS)
+      {
+        (void)s_parser_advance(p);
+        sig->is_variadic = true;
+        sig->variadic_type = MI_TYPE_ANY;
+        if (s_parser_match(p, MI_TOK_COLON))
+        {
+          MiTypeKind vt = MI_TYPE_ANY;
+          MiFuncTypeSig* vt_func_sig = NULL;
+          s_parse_type_spec(p, &vt, &vt_func_sig);
+          if (p->had_error)
+          {
+            return NULL;
+          }
+          sig->variadic_type = vt;
+        }
+
+        if (s_parser_match(p, MI_TOK_COMMA))
+        {
+          s_parser_set_error(p, "Variadic '...' must be the last parameter", s_parser_prev(p));
+          return NULL;
+        }
+        break;
+      }
+
       if (!s_parser_expect(p, MI_TOK_IDENTIFIER, "Expected parameter name"))
       {
         return NULL;
@@ -1183,6 +1221,47 @@ if (s_parser_match(p, MI_TOK_COLON))
   if (!s_parser_expect(p, MI_TOK_RBRACE, "Expected '}' after function body"))
   {
     return NULL;
+  }
+
+  /* Internal typed signature for cmd: [ret_type, fixed_count, t0..tN-1, variadic_type_or_-1].
+     This is used by the runtime to attach MiFuncTypeSig metadata to the created cmd.
+     It is created once at declaration time (NOT per call). */
+  {
+    MiToken itok;
+    itok.kind = MI_TOK_INT;
+    itok.lexeme = x_slice_init("", 0);
+    itok.line = func_tok.line;
+    itok.column = func_tok.column;
+
+    MiExpr* sig_list = s_new_expr(p, MI_EXPR_LIST, func_tok, true);
+    if (!sig_list) return NULL;
+    sig_list->as.list.items = NULL;
+
+    MiExpr* e_ret = s_new_expr(p, MI_EXPR_INT_LITERAL, itok, true);
+    if (!e_ret) return NULL;
+    e_ret->as.int_lit.value = (int64_t)sig->ret_type;
+    sig_list->as.list.items = s_expr_list_append(p, sig_list->as.list.items, e_ret);
+
+    MiExpr* e_fixed = s_new_expr(p, MI_EXPR_INT_LITERAL, itok, true);
+    if (!e_fixed) return NULL;
+    e_fixed->as.int_lit.value = (int64_t)sig->param_count;
+    sig_list->as.list.items = s_expr_list_append(p, sig_list->as.list.items, e_fixed);
+
+    for (int i = 0; i < sig->param_count; ++i)
+    {
+      MiExpr* et = s_new_expr(p, MI_EXPR_INT_LITERAL, itok, true);
+      if (!et) return NULL;
+      et->as.int_lit.value = (int64_t)sig->params[i].type;
+      sig_list->as.list.items = s_expr_list_append(p, sig_list->as.list.items, et);
+    }
+
+    MiExpr* e_var = s_new_expr(p, MI_EXPR_INT_LITERAL, itok, true);
+    if (!e_var) return NULL;
+    e_var->as.int_lit.value = sig->is_variadic ? (int64_t)sig->variadic_type : (int64_t)-1;
+    sig_list->as.list.items = s_expr_list_append(p, sig_list->as.list.items, e_var);
+
+    args = s_expr_list_append(p, args, sig_list);
+    argc = argc + 1;
   }
 
   MiExpr* block = s_new_expr(p, MI_EXPR_BLOCK, func_tok, false);
@@ -1307,6 +1386,8 @@ static MiFuncTypeSig* s_parse_func_type_sig(MiParser* p, MiToken func_tok)
 
   /* Optional -> return type, default void. */
   sig->ret_type = MI_TYPE_VOID;
+  sig->is_variadic = false;
+  sig->variadic_type = MI_TYPE_ANY;
   sig->ret_tok = sig->rparen_tok;
   if (s_parser_match(p, MI_TOK_MINUS) && s_parser_match(p, MI_TOK_GT))
   {

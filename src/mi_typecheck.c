@@ -283,14 +283,25 @@ static MiTypeKind s_tc_command_expr(const MiScript* script, const MiExpr* e, MiT
     const MiFuncSig* sig = s_find_sig(script, name);
     if (sig)
     {
-      // Arg count check.
-      if ((int)e->as.command.argc != sig->param_count)
+      // Arg count check (supports variadic).
+      if (!sig->is_variadic)
       {
-        s_tc_error(err, head->token, "Function call argument count mismatch");
-        return MI_TYPE_ANY;
+        if ((int)e->as.command.argc != sig->param_count)
+        {
+          s_tc_error(err, head->token, "Function call argument count mismatch");
+          return MI_TYPE_ANY;
+        }
+      }
+      else
+      {
+        if ((int)e->as.command.argc < sig->param_count)
+        {
+          s_tc_error(err, head->token, "Function call argument count mismatch");
+          return MI_TYPE_ANY;
+        }
       }
 
-      // Type check args.
+      // Type check args (fixed params first, then variadic tail).
       const MiExprList* it = e->as.command.args;
       for (int i = 0; i < sig->param_count; i++)
       {
@@ -349,6 +360,31 @@ static MiTypeKind s_tc_command_expr(const MiScript* script, const MiExpr* e, MiT
         }
         it = it ? it->next : NULL;
       }
+
+      if (sig->is_variadic)
+      {
+        MiTypeKind vt = sig->variadic_type;
+        int extra = (int)e->as.command.argc - sig->param_count;
+        for (int j = 0; j < extra; ++j)
+        {
+          const MiExpr* arg = it ? it->expr : NULL;
+          MiTypeKind got = s_tc_expr(script, arg, env, err);
+          if (err && err->message.length)
+          {
+            return MI_TYPE_ANY;
+          }
+          if (vt != MI_TYPE_ANY)
+          {
+            if (!s_type_compatible(got, vt))
+            {
+              s_tc_error(err, arg ? arg->token : head->token, "Function argument type mismatch");
+              return MI_TYPE_ANY;
+            }
+          }
+          it = it ? it->next : NULL;
+        }
+      }
+
       return sig->ret_type;
     }
 

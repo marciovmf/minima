@@ -2,6 +2,8 @@
 #define MI_MX_H
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdx_arena.h>
 #include <stdx_string.h>
 #include "mi_vm.h"
 #include "mi_version.h"
@@ -15,8 +17,9 @@
 
 typedef struct MiMixProgram
 {
-  MiVmChunk* entry;
   /* Owns all allocations made when loading. */
+  XArena*    arena;
+  MiVmChunk* entry;
   MiVmChunk** chunks;
   size_t      chunk_count;
 } MiMixProgram;

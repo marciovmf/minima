@@ -71,17 +71,36 @@ struct MiRtValue
 /* Native (C) command signature used by first-class command values. */
 typedef MiRtValue (*MiRtNativeFn)(struct MiVm* vm, XSlice cmd_name, int argc, const MiRtValue* argv);
 
+/* Native (C) command signature with userdata (preferred for host APIs). */
+typedef MiRtValue (*MiRtNativeFn2)(struct MiVm* vm, void* user, int argc, const MiRtValue* argv);
+
+/* Forward-declared function signature type (owned by VM).
+   Declared in mi_parse.h and reused here to avoid duplicating enums/structs. */
+typedef struct MiFuncTypeSig MiFuncTypeSig;
+
 struct MiRtCmd
 {
   bool       is_native;
   uint32_t   param_count;
   XSlice*    param_names; /* heap buffer owned by cmd */
 
+  /* Optional function signature metadata.
+     For native cmds this is required (except transitional variadics).
+     Owned by the VM (perm arena) and referenced here. */
+  const MiFuncTypeSig* sig;
+
+  /* Optional doc string (owned by VM). */
+  XSlice     doc;
+
   /* If is_native == false, body is MI_RT_VAL_BLOCK (retained). */
   MiRtValue  body;
 
   /* If is_native == true, call this instead of executing body. */
   MiRtNativeFn native_fn;
+
+  /* Preferred native entrypoint with userdata (may be NULL). */
+  MiRtNativeFn2 native_fn2;
+  void*         native_user;
 };
 
 typedef struct MiRtDictEntry
@@ -347,6 +366,7 @@ void mi_rt_pair_set(MiRuntime* rt, MiRtPair* pair, int index, MiRtValue v);
 MiRtBlock* mi_rt_block_create(MiRuntime* rt);
 MiRtCmd*   mi_rt_cmd_create(MiRuntime* rt, uint32_t param_count, const XSlice* param_names, MiRtValue body);
 MiRtCmd*   mi_rt_cmd_create_native(MiRuntime* rt, MiRtNativeFn native_fn);
+MiRtCmd*   mi_rt_cmd_create_native2(MiRuntime* rt, MiRtNativeFn2 native_fn2, void* user, const MiFuncTypeSig* sig, XSlice doc);
 
 /**
  * Append a value to a runtime list.
