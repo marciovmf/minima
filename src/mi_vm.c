@@ -887,7 +887,6 @@ static MiRtValue s_vm_cmd_print(MiVm* vm, void* user, int argc, const MiRtValue*
 
 static const char* s_op_name(MiVmOp op);
 
-
 static void s_vm_trace_print_frame(const MiVmChunk* chunk, size_t ip, const char* label)
 {
   if (!chunk)
@@ -935,7 +934,6 @@ static void s_vm_trace_print_frame(const MiVmChunk* chunk, size_t ip, const char
     (unsigned)ins.c,
     (int)ins.imm);
 }
-
 
 static void s_vm_trace_print(MiVm* vm)
 {

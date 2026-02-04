@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "minima.h"
-#include "mi_cli.h"
 
 //----------------------------------------------------------
 // CLI helpers
@@ -143,7 +142,7 @@ static bool s_cached_mx_for_mi(const char* cache_dir_opt, const char* src_mi, XF
 // Actions
 //----------------------------------------------------------
 
-static int s_cmd_compile_only(const char* in_file, const char* out_file, const char* cache_dir)
+int mi_compile_only(const char* in_file, const char* out_file, const char* cache_dir)
 {
   size_t src_len = 0;
   char* src = x_io_read_text(in_file, &src_len);
@@ -211,7 +210,7 @@ static int s_cmd_compile_only(const char* in_file, const char* out_file, const c
   return 0;
 }
 
-static int s_cmd_disasm(const char* mx_file, const char* cache_dir)
+int mi_disasm(const char* mx_file, const char* cache_dir)
 {
   MiRuntime rt;
   mi_rt_init(&rt);
@@ -237,7 +236,7 @@ static int s_cmd_disasm(const char* mx_file, const char* cache_dir)
   return 0;
 }
 
-static int s_cmd_disasm_mi(const char* mi_file, const char* cache_dir)
+int mi_disasm_mi(const char* mi_file, const char* cache_dir)
 {
   XFSPath cached_mx;
   if (!s_cached_mx_for_mi(cache_dir, mi_file, &cached_mx))
@@ -261,17 +260,17 @@ static int s_cmd_disasm_mi(const char* mi_file, const char* cache_dir)
 
   if (!have_mx || mi_time > mx_time)
   {
-    int rc = s_cmd_compile_only(mi_file, cached_mx.buf, cache_dir);
+    int rc = mi_compile_only(mi_file, cached_mx.buf, cache_dir);
     if (rc != 0)
     {
       return rc;
     }
   }
 
-  return s_cmd_disasm(cached_mx.buf, cache_dir);
+  return mi_disasm(cached_mx.buf, cache_dir);
 }
 
-static int s_cmd_run_source(const char* mi_file, const char* cache_dir)
+int mi_run_source(const char* mi_file, const char* cache_dir)
 {
   MiRuntime rt;
   mi_rt_init(&rt);
@@ -387,7 +386,7 @@ static int s_cmd_run_source(const char* mi_file, const char* cache_dir)
   return 0;
 }
 
-static int s_cmd_run_mix(const char* mx_file, const char* cache_dir)
+int mi_run_mx(const char* mx_file, const char* cache_dir)
 {
   MiRuntime rt;
   mi_rt_init(&rt);
@@ -411,90 +410,4 @@ static int s_cmd_run_mix(const char* mx_file, const char* cache_dir)
   mi_vm_shutdown(&vm);
   mi_rt_shutdown(&rt);
   return 0;
-}
-
-//----------------------------------------------------------
-// main
-//----------------------------------------------------------
-
-int minima_cli_main(int argc, char** argv)
-{
-  if (argc < 2)
-  {
-    s_usage(argv[0]);
-    return 1;
-  }
-
-  const char* cache_dir = NULL;
-  int argi = 1;
-  if (argi + 2 <= argc && strcmp(argv[argi], "--cache-dir") == 0)
-  {
-    cache_dir = argv[argi + 1];
-    argi += 2;
-  }
-
-  int rem = argc - argi;
-  char** args = &argv[argi];
-  if (rem < 1)
-  {
-    s_usage(argv[0]);
-    return 1;
-  }
-
-  // Compile only
-  if (strcmp(args[0], "-c") == 0)
-  {
-    if (rem != 2 && rem != 3)
-    {
-      s_usage(argv[0]);
-      return 1;
-    }
-
-    const char* in_file = args[1];
-    XFSPath out_file;
-
-    if (rem == 3)
-    {
-      x_fs_path(&out_file, args[2]);
-    }
-    else
-    {
-      x_fs_path(&out_file, in_file);
-      x_fs_path_change_extension(&out_file, ".mx");
-    }
-
-    int r = s_cmd_compile_only(in_file, out_file.buf, cache_dir);
-    return r;
-  }
-
-  // Disassemble
-  if (strcmp(args[0], "-d") == 0)
-  {
-    if (rem != 2)
-    {
-      s_usage(argv[0]);
-      return 1;
-    }
-
-    const char* in_file = args[1];
-    if (s_has_ext(in_file, ".mi"))
-    {
-      return s_cmd_disasm_mi(in_file, cache_dir);
-    }
-    return s_cmd_disasm(in_file, cache_dir);
-  }
-
-  // Single arg: compile+run or run MIX
-  if (rem == 1)
-  {
-    const char* path = args[0];
-    if (s_has_ext(path, ".mx"))
-    {
-      return s_cmd_run_mix(path, cache_dir);
-    }
-    return s_cmd_run_source(path, cache_dir);
-  }
-
-  s_usage(argv[0]);
-  return 1;
 }
