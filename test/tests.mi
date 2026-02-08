@@ -1,4 +1,5 @@
-include "includes/util" as util;
+include "includes/util" ; // relative to this file path;
+include "module_core/int" as int;
 
 // ============================================================
 // Helpers
@@ -17,6 +18,50 @@ func _decrement(a:int) -> int
 func _dispatch(a:int, b:int, callback:func(int)->int) -> int
 {
   return callback(a + b);
+}
+
+func _simple_sum(...:int) -> int
+{
+  x = arg(0) + arg(1) + arg(2);
+  return x;
+}
+
+func _sum_all(...:int) -> int
+{
+  total = 0;
+  i = 0;
+
+  while (i < argc())
+  {
+    total = total + arg(i);
+    i = i + 1;
+  }
+
+  return total;
+}
+
+func _first(...:int) -> int
+{
+  return arg(0);
+}
+
+func _weighted_sum(base:int, ...:int) -> int
+{
+  total = base;
+  i = 1; // skip the first arg
+
+  while (i < argc())
+  {
+    total = total + arg(i);
+    i = i + 1;
+  }
+  return total;
+}
+
+func _average3(...:int) -> int
+{
+  sum = arg(0) + arg(1) + arg(2);
+  return sum / 3;
 }
 
 // ============================================================
@@ -100,7 +145,7 @@ func test_dict()
   util::assert_eq(d["x"], 42, "dict: create key via index");
 
   // nested usage (value reuse)
-  y = d["a"] + d["b"];
+  y = int::cast(d["a"]) + int::cast(d["b"]);
   util::assert_eq(y, 12, "dict: read + arithmetic");
 }
 
@@ -199,6 +244,16 @@ func test_function_as_arg()
   util::assert_eq(result, 101, "func: callback passed as arg");
 }
 
+func test_variadic()
+{
+  util::assert_eq(_simple_sum(10, 20, 30), 60, "simple_sum");
+  util::assert_eq(_sum_all(1, 2, 3, 4, 5), 15, "sum_all");
+  util::assert_eq(_first(42, 100, 200), 42, "first");
+  util::assert_eq(_weighted_sum(10, 1, 2, 3), 16, "wheighted_sum");
+  util::assert_eq(_average3(9, 12, 15), 12, "average3");
+}
+
+
 // ============================================================
 // Test runner
 // ============================================================
@@ -209,7 +264,8 @@ tests = [
   test_dict,
   test_foreach,
   test_dynamic_functions,
-  test_function_as_arg
+  test_function_as_arg,
+  test_variadic
 ];
 
 failures = 0;

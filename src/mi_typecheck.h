@@ -3,6 +3,8 @@
 
 #include "mi_parse.h"
 
+typedef struct MiVm MiVm;
+
 typedef struct MiTypecheckError
 {
   int line;
@@ -10,7 +12,7 @@ typedef struct MiTypecheckError
   XSlice message;
 } MiTypecheckError;
 
-bool mi_typecheck_script(const MiScript* script, MiTypecheckError* err);
+bool mi_typecheck_script(const MiScript* script, MiVm* vm, XSlice dbg_file, MiTypecheckError* err);
 
 void mi_typecheck_print_error(XSlice source, const MiTypecheckError* err);
 

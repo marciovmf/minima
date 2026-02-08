@@ -15,7 +15,7 @@
 #define MI_MX_MAGIC_2 'X'
 #define MI_MX_MAGIC_3 '>'
 
-/* MI_MX_VERSION defined in mi_mx.h */
+// MI_MX_VERSION defined in mi_mx.h 
 
 typedef struct MiMixHeader
 {
@@ -422,9 +422,9 @@ static bool s_save_chunk(FILE* f, const MiVmChunk* c, const MiMixChunkMap* map)
     }
   }
 
-  /* Debug info: optional payload, but the presence byte is always encoded.
-     This keeps the stream layout stable across versions (version is only a
-     compatibility gate: file_version <= MI_MX_VERSION). */
+  // Debug info: optional payload, but the presence byte is always encoded.
+  // This keeps the stream layout stable across versions (version is only a
+  // compatibility gate: file_version <= MI_MX_VERSION).
   {
     bool has_dbg = (c->dbg_name.length != 0u) || (c->dbg_file.length != 0u) || (c->dbg_lines != NULL) || (c->dbg_cols != NULL);
     if (!s_write_u8(f, (uint8_t)(has_dbg ? 1 : 0)))
@@ -437,7 +437,7 @@ static bool s_save_chunk(FILE* f, const MiVmChunk* c, const MiMixChunkMap* map)
       if (!s_write_slice(f, c->dbg_name)) return false;
       if (!s_write_slice(f, c->dbg_file)) return false;
 
-      /* Per-instruction line/column mapping. */
+      // Per-instruction line/column mapping. 
       for (size_t i = 0; i < c->code_count; ++i)
       {
         uint32_t line = c->dbg_lines ? c->dbg_lines[i] : 0u;
@@ -684,9 +684,9 @@ static bool s_load_chunk(FILE* f, XArena* arena, MiVmChunk* out, uint32_t versio
     }
   }
 
-  /* Debug info: always encoded as a presence byte + optional payload.
-     Do not gate this on file version; version is only used as a compatibility
-     check (file_version <= MI_MX_VERSION). */
+  // Debug info: always encoded as a presence byte + optional payload.
+  // Do not gate this on file version; version is only used as a compatibility
+  // check (file_version <= MI_MX_VERSION).
   {
     uint8_t has_dbg = 0;
     if (!s_read_u8(f, &has_dbg))

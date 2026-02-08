@@ -127,7 +127,7 @@ static void s_value_pre_destroy(MiRuntime* rt, MiRtValue v)
   }
   else if (v.kind == MI_RT_VAL_BLOCK && v.as.block)
   {
-    /* Blocks currently don't own their env/payload memory. */
+    // Blocks currently don't own their env/payload memory. 
   }
   else if (v.kind == MI_RT_VAL_CMD && v.as.cmd)
   {
@@ -197,13 +197,13 @@ void mi_rt_shutdown(MiRuntime* rt)
     return;
   }
 
-  /* Pop all scopes down to root, releasing values. */
+  // Pop all scopes down to root, releasing values. 
   while (rt->current && rt->current != &rt->root)
   {
     mi_rt_scope_pop(rt);
   }
 
-  /* Release all values stored in the root scope. */
+  // Release all values stored in the root scope. 
   {
     MiRtVar* it = rt->root.vars;
     while (it)
@@ -214,7 +214,7 @@ void mi_rt_shutdown(MiRuntime* rt)
     rt->root.vars = NULL;
   }
 
-  /* Destroy cached/free frames. Values were released on pop, so just free arenas. */
+  // Destroy cached/free frames. Values were released on pop, so just free arenas. 
   while (rt->free_frames)
   {
     MiScopeFrame* f = rt->free_frames;
@@ -228,7 +228,7 @@ void mi_rt_shutdown(MiRuntime* rt)
     free(f);
   }
 
-  /* Release user commands array (names are interned via heap and released below). */
+  // Release user commands array (names are interned via heap and released below). 
   if (rt->commands)
   {
     free(rt->commands);
@@ -237,7 +237,7 @@ void mi_rt_shutdown(MiRuntime* rt)
   rt->command_count = 0u;
   rt->command_capacity = 0u;
 
-  /* Release interned symbol names. */
+  // Release interned symbol names. 
   if (rt->sym_names)
   {
     for (size_t i = 0u; i < rt->sym_count; ++i)
@@ -250,7 +250,7 @@ void mi_rt_shutdown(MiRuntime* rt)
   rt->sym_count = 0u;
   rt->sym_capacity = 0u;
 
-  /* Destroy root arena last (it owns scope vars allocations). */
+  // Destroy root arena last (it owns scope vars allocations). 
   if (rt->root.arena)
   {
     x_arena_destroy(rt->root.arena);
@@ -364,7 +364,13 @@ void mi_rt_value_release(MiRuntime* rt, MiRtValue v)
     return;
   }
 
-  /* If this is the last reference, release children before freeing. */
+  if (hdr->kind == MI_OBJ_BLOCK && hdr->refcount == 1)
+  {
+    MiRtBlock* b = (MiRtBlock*)p;
+    printf("FREE BLOCK %p block_kind=%d ptr=%p env=%p\n", b, b->kind, b->ptr, b->env);
+  }
+
+  // If this is the last reference, release children before freeing. 
   if (hdr->refcount == 1u)
   {
     s_value_pre_destroy(rt, v);
@@ -373,21 +379,100 @@ void mi_rt_value_release(MiRuntime* rt, MiRtValue v)
   mi_heap_release_payload(&rt->heap, p);
 }
 
-void mi_rt_value_assign(MiRuntime* rt, MiRtValue* dst, MiRtValue src)
+void __mi_rt_value_assign(MiRuntime* rt, MiRtValue* dst, MiRtValue src)
 {
   if (!dst)
   {
     return;
   }
 
+  // Self-assignment guard for ref-counted payloads.
+  // This matters in cases like:
+  // include "foo" as foo;
+  // where include() may return the exact same block instance that is already
+  // stored in the destination. If we release before retaining, the object can
+  // hit refcount==0 and be returned to the heap free-list, corrupting the
+  // variable (and any subsequent qualified member lookups like foo::bar).
+  //
   if (rt)
   {
-    mi_rt_value_release(rt, *dst);
+    // If both sides reference the same heap payload, do nothing. 
+    const void* dp = NULL;
+    const void* sp = NULL;
+
+    switch (dst->kind)
+    {
+      case MI_RT_VAL_LIST:  dp = dst->as.list; break;
+      case MI_RT_VAL_DICT:  dp = dst->as.dict; break;
+      case MI_RT_VAL_PAIR:  dp = dst->as.pair; break;
+      case MI_RT_VAL_BLOCK: dp = dst->as.block; break;
+      case MI_RT_VAL_CMD:   dp = dst->as.cmd; break;
+      default: break;
+    }
+
+    switch (src.kind)
+    {
+      case MI_RT_VAL_LIST:  sp = src.as.list; break;
+      case MI_RT_VAL_DICT:  sp = src.as.dict; break;
+      case MI_RT_VAL_PAIR:  sp = src.as.pair; break;
+      case MI_RT_VAL_BLOCK: sp = src.as.block; break;
+      case MI_RT_VAL_CMD:   sp = src.as.cmd; break;
+      default: break;
+    }
+
+    if (dp && sp && dp == sp)
+    {
+      *dst = src;
+      return;
+    }
+  }
+
+  if (rt)
+  {
+    // Retain first so self-assignment cannot drop the refcount to zero. 
     mi_rt_value_retain(rt, src);
+    mi_rt_value_release(rt, *dst);
   }
 
   *dst = src;
 }
+
+
+static void* s_payload_ptr(MiRtValue v)
+{
+  switch (v.kind)
+  {
+    case MI_RT_VAL_LIST:  return v.as.list;
+    case MI_RT_VAL_DICT:  return v.as.dict;
+    case MI_RT_VAL_PAIR:  return v.as.pair;
+    case MI_RT_VAL_BLOCK: return v.as.block;
+    case MI_RT_VAL_CMD:   return v.as.cmd;
+    default:               return NULL;
+  }
+}
+
+void mi_rt_value_assign(MiRuntime* rt, MiRtValue* dst, MiRtValue src)
+{
+  if (!dst) return;
+
+  if (rt)
+  {
+    void* a = s_payload_ptr(*dst);
+    void* b = s_payload_ptr(src);
+
+    if (a && b && a == b)
+    {
+      *dst = src; // self-assign: nada a fazer
+      return;
+    }
+
+    mi_rt_value_retain(rt, src);
+    mi_rt_value_release(rt, *dst);
+  }
+
+  *dst = src;
+}
+
 
 void mi_rt_scope_push(MiRuntime* rt)
 {
@@ -442,7 +527,7 @@ void mi_rt_scope_destroy_detached(MiRuntime* rt, MiScopeFrame* frame)
     return;
   }
 
-  /* Release values stored in this frame before freeing heap objects. */
+  // Release values stored in this frame before freeing heap objects. 
   MiRtVar* it = frame->vars;
   while (it)
   {
@@ -463,7 +548,7 @@ void mi_rt_scope_pop(MiRuntime* rt)
 
   MiScopeFrame* dead = rt->current;
 
-  /* Release all values stored in this frame before the arena is reused. */
+  // Release all values stored in this frame before the arena is reused. 
   MiRtVar* it = dead->vars;
   while (it)
   {
@@ -704,7 +789,7 @@ MiRtList* mi_rt_list_create(MiRuntime* rt)
 
 static uint64_t s_hash_u64(uint64_t x)
 {
-  /* SplitMix64 mix (public domain). */
+  // SplitMix64 mix (public domain). 
   x = (x ^ (x >> 30u)) * 0xbf58476d1ce4e5b9ULL;
   x = (x ^ (x >> 27u)) * 0x94d049bb133111ebULL;
   return x ^ (x >> 31u);
@@ -713,7 +798,7 @@ static uint64_t s_hash_u64(uint64_t x)
 static uint64_t s_hash_bytes(const void* data, size_t len)
 {
   const uint8_t* p = (const uint8_t*)data;
-  uint64_t h = 1469598103934665603ULL; /* FNV-1a 64 */
+  uint64_t h = 1469598103934665603ULL; // FNV-1a 64 
   for (size_t i = 0u; i < len; ++i)
   {
     h = h ^ (uint64_t)p[i];
@@ -855,7 +940,7 @@ static bool s_dict_grow(MiRuntime* rt, MiRtDict* d, size_t new_capacity)
         continue;
       }
 
-      /* Reinsert without retain/release: ownership stays in the dict. */
+      // Reinsert without retain/release: ownership stays in the dict. 
       uint64_t h = s_hash_value(e->key);
       size_t mask = d->capacity - 1u;
       size_t idx = (size_t)h & mask;
@@ -913,7 +998,7 @@ bool mi_rt_dict_set(MiRuntime* rt, MiRtDict* d, MiRtValue key, MiRtValue value)
     }
   }
 
-  /* Grow if load factor (including tombstones) gets high. */
+  // Grow if load factor (including tombstones) gets high. 
   size_t used = d->count + d->tombstones;
   if (used * 4u >= d->capacity * 3u)
   {
@@ -1230,7 +1315,7 @@ bool mi_rt_list_push(MiRtList* list, MiRtValue v)
     list->capacity = new_cap;
   }
 
-  /* The list owns a reference to v (if it is a ref value). */
+  // The list owns a reference to v (if it is a ref value). 
   mi_heap_retain_payload(
       (v.kind == MI_RT_VAL_LIST)  ? (void*)v.as.list :
       (v.kind == MI_RT_VAL_PAIR)  ? (void*)v.as.pair :

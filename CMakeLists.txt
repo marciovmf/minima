@@ -7,6 +7,12 @@ set(VERSION_PATCH 0)
 set(VERSION_MINOR 0)
 set(VERSION_STRING ${VERSION_MAJOR}_${VERSION_MINOR}_${VERSION_PATCH})
 
+if(MSVC)
+  add_compile_options(/W4 /WX)
+else()
+  add_compile_options(-Wall -Wextra -pedantic -Werror)
+endif()
+
 function(set_target_output_directory  target dir)
   foreach(conf "" "_DEBUG" "_RELEASE" "_RELWITHDEBINFO" "_MINSIZEREL")
     set_target_properties(${target} PROPERTIES
@@ -19,11 +25,12 @@ endfunction()
 
 # Build dependencies
 set(STDX_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/src/include")
+set(OUTPUT_DIR ${CMAKE_CURRENT_LIST_DIR}/bin/${CMAKE_SYSTEM_NAME}_${CMAKE_HOST_SYSTEM_PROCESSOR}_$<CONFIG>)
 
 list(APPEND SOURCES 
   ${CMAKE_CURRENT_LIST_DIR}/src/main.c
-  ${CMAKE_CURRENT_LIST_DIR}/src/mi_cli.c
-  ${CMAKE_CURRENT_LIST_DIR}/src/mi_cli.h
+  ${CMAKE_CURRENT_LIST_DIR}/src/minima.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/minima.h
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_version.h
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_compile.c
   ${CMAKE_CURRENT_LIST_DIR}/src/mi_compile.h
@@ -53,11 +60,22 @@ add_executable(minima ${CMAKE_CURRENT_LIST_DIR}/src/main.c ${SOURCES})
 target_include_directories(minima PUBLIC ${STDX_INCLUDE_DIR})
 set_target_properties(minima PROPERTIES
   VERSION ${VERSION_MAJOR}.${VERSION_MINOR})
-set_target_output_directory(minima ${CMAKE_CURRENT_LIST_DIR}/bin/${CMAKE_SYSTEM_NAME}_${CMAKE_HOST_SYSTEM_PROCESSOR}_$<CONFIG>)
+set_target_output_directory(minima ${OUTPUT_DIR})
 
-if(MSVC)
-  target_compile_options(minima PRIVATE /W4 /WX)
-else()
-  target_compile_options(minima PRIVATE -Wall -Wextra -pedantic -Werror)
-endif()
 
+# Modules
+
+list(APPEND MODULE_CORE_SRC
+  ${CMAKE_CURRENT_LIST_DIR}/src/module/core/mi_core.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/module/core/mi_core_int.h
+  ${CMAKE_CURRENT_LIST_DIR}/src/module/core/mi_core_int.c
+  ${CMAKE_CURRENT_LIST_DIR}/src/module/core/mi_core_float.h
+  ${CMAKE_CURRENT_LIST_DIR}/src/module/core/mi_core_float.c
+)
+
+add_library(module_core SHARED ${MODULE_CORE_SRC})
+target_include_directories(module_core PUBLIC
+  ${STDX_INCLUDE_DIR}
+  "${CMAKE_CURRENT_LIST_DIR}/src")
+
+set_target_output_directory(module_core ${OUTPUT_DIR}/module)

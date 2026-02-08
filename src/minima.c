@@ -3,37 +3,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include "minima.h"
+#include "mi_vm.h"
+#include "stdx_filesystem.h"
 
 //----------------------------------------------------------
 // CLI helpers
 //----------------------------------------------------------
-
-static void s_usage(const char* exe)
-{
-
-  mi_error_fmt(
-      "minima v%d.%d.%d\n"
-      "Usage:\n"
-      "  %s [--cache-dir <dir>] -c <file.min> [out.mx]   Compile only (default out = file.min.mx)\n"
-      "  %s [--cache-dir <dir>] -d <file.mi|file.mx>      Disassemble (compile if needed)\n"
-      "  %s [--cache-dir <dir>] <file.min>               Compile and run\n"
-      "  %s [--cache-dir <dir>] <file.mx>                Run MIX file\n",
-      MINIMA_VERSION_MAJOR,
-      MINIMA_VERSION_PATCH,
-      MINIMA_VERSION_MINOR,
-      exe, exe, exe, exe);
-}
-
-static bool s_has_ext(const char* path, const char* ext)
-{
-  size_t lp = strlen(path);
-  size_t le = strlen(ext);
-  if (lp < le)
-  {
-    return false;
-  }
-  return strcmp(path + (lp - le), ext) == 0;
-}
 
 static bool s_get_cache_root(const char* cache_dir_opt, XFSPath* out_root)
 {
@@ -142,6 +117,19 @@ static bool s_cached_mx_for_mi(const char* cache_dir_opt, const char* src_mi, XF
 // Actions
 //----------------------------------------------------------
 
+static const char* s_get_modules_dir()
+{
+  static XFSPath s_modules_dir = {0};
+  if (s_modules_dir.length == 0)
+  {
+    XFSPath exe_path = {0};
+    x_fs_path_from_executable(&exe_path);
+    x_fs_path_from_slice(x_fs_path_dirname(exe_path.buf), &s_modules_dir);
+    x_fs_path_join(&s_modules_dir, "module");
+  }
+  return s_modules_dir.buf;
+}
+
 int mi_compile_only(const char* in_file, const char* out_file, const char* cache_dir)
 {
   size_t src_len = 0;
@@ -160,6 +148,7 @@ int mi_compile_only(const char* in_file, const char* out_file, const char* cache
   MiVm vm;
   mi_vm_init(&vm, &rt);
   mi_vm_set_cache_dir(&vm, cache_dir);
+  mi_vm_set_modules_dir(&vm, s_get_modules_dir());
 
   XArena* arena = x_arena_create(1024 * 64);
   if (!arena)
@@ -218,6 +207,7 @@ int mi_disasm(const char* mx_file, const char* cache_dir)
   MiVm vm;
   mi_vm_init(&vm, &rt);
   mi_vm_set_cache_dir(&vm, cache_dir);
+  mi_vm_set_modules_dir(&vm, s_get_modules_dir());
 
   MiMixProgram p;
   if (!mi_mx_load_file(&vm, mx_file, &p))
@@ -278,6 +268,7 @@ int mi_run_source(const char* mi_file, const char* cache_dir)
   MiVm vm;
   mi_vm_init(&vm, &rt);
   mi_vm_set_cache_dir(&vm, cache_dir);
+  mi_vm_set_modules_dir(&vm, s_get_modules_dir());
 
   // Try cached .mx first
   XFSPath cached_mx;
@@ -394,6 +385,8 @@ int mi_run_mx(const char* mx_file, const char* cache_dir)
   MiVm vm;
   mi_vm_init(&vm, &rt);
   mi_vm_set_cache_dir(&vm, cache_dir);
+
+  mi_vm_set_modules_dir(&vm, s_get_modules_dir());
 
   MiMixProgram p;
   if (!mi_mx_load_file(&vm, mx_file, &p))

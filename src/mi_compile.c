@@ -18,7 +18,7 @@ static bool      s_chunk_const_eq(MiRtValue a, MiRtValue b);
 static void      s_chunk_emit_loc(MiVmChunk* c, uint32_t line, uint32_t col, MiVmOp op, uint8_t a, uint8_t b, uint8_t c0, int32_t imm);
 
 static MiVmChunk* s_chunk_create(void);
-static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XArena* arena, XSlice dbg_name, XSlice dbg_file);
+static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XArena* arena, XSlice dbg_name, XSlice dbg_file, bool skip_typecheck);
 
 static void* s_realloc(void* ptr, size_t size)
 {
@@ -102,7 +102,7 @@ static bool s_chunk_const_eq(MiRtValue a, MiRtValue b)
                          {
                            return s_slice_eq(a.as.s, b.as.s);
                          }
-    case MI_RT_VAL_BLOCK: /* blocks compared by pointer identity */ return a.as.block == b.as.block;
+    case MI_RT_VAL_BLOCK: return a.as.block == b.as.block; // blocks compared by pointer identity
     case MI_RT_VAL_CMD:   return a.as.cmd == b.as.cmd;
     case MI_RT_VAL_LIST:  return a.as.list == b.as.list;
     case MI_RT_VAL_DICT:  return a.as.dict == b.as.dict;
@@ -124,7 +124,7 @@ static void s_chunk_dbg_grow(MiVmChunk* c, size_t new_cap)
 
   bool want_dbg = (c->dbg_name.length != 0u) || (c->dbg_file.length != 0u);
 
-  /* dbg_* arrays are optional; allocate/grow only when requested. */
+  // dbg_* arrays are optional; allocate/grow only when requested. 
   if (want_dbg && !c->dbg_lines)
   {
     c->dbg_lines = (uint32_t*)s_realloc(NULL, new_cap * sizeof(*c->dbg_lines));
@@ -279,7 +279,7 @@ static int32_t s_chunk_find_symbol(const MiVmChunk* c, XSlice name)
   return -1;
 }
 
-/* Command lookup lives in the VM runtime. */
+// Command lookup lives in the VM runtime. 
 
 static int32_t s_chunk_add_cmd_target(MiVmChunk* c, XSlice name, MiRtCmd* target)
 {
@@ -336,17 +336,15 @@ typedef struct MiVmBuild
   uint8_t     next_reg;
   uint8_t     reg_base;
 
-  /* Names of typed `func` declarations in the current script.
-     Used to compile `foo` as a first-class function value (currently a string name)
-     without requiring VM changes. */
+  // Names of typed `func` declarations in the current script
   XSlice*     func_names;
   size_t      func_name_count;
 
-  /* Current source location for emitted instructions (1-based; 0 = unknown). */
+  // Current source location for emitted instructions (1-based; 0 = unknown). 
   uint32_t    dbg_line;
   uint32_t    dbg_col;
 
-  /* Loop context stack (compiler-only). Needed for break/continue. */
+  // Loop context stack (compiler-only). Needed for break/continue. 
   int         loop_depth;
   struct
   {
@@ -356,9 +354,9 @@ typedef struct MiVmBuild
     int     scope_base_depth; // inline_scope_depth value outside this loop
   } loops[16];
 
-  /* Tracks active inlined scope depth for proper cleanup on `return`.
-     This only tracks scopes created by MI_VM_OP_SCOPE_PUSH/POP emitted
-     by the compiler (e.g. inlined while bodies). */
+  // Tracks active inlined scope depth for proper cleanup on `return`.
+  // This only tracks scopes created by MI_VM_OP_SCOPE_PUSH/POP emitted
+  // by the compiler (e.g. inlined while bodies).
   int         inline_scope_depth;
 
   // When >0, we are compiling an expression that is itself an argument of
@@ -461,7 +459,7 @@ static void s_chunk_patch_imm(MiVmChunk* c, size_t ins_index, int32_t imm)
   }
   c->code[ins_index].imm = imm;
 
-  /* Suppress JMP/JT/JF 0: fallthrough is implicit. */
+  // Suppress JMP/JT/JF 0: fallthrough is implicit. 
   if (imm == 0)
   {
     MiVmOp op = (MiVmOp)c->code[ins_index].op;
@@ -579,12 +577,12 @@ static uint8_t s_compile_command_expr(MiVmBuild* b, const MiExpr* e, bool wants_
   const MiExpr* head_dbg = (e && e->kind == MI_EXPR_COMMAND) ? e->as.command.head : NULL;
   s_set_dbg(b, head_dbg ? &head_dbg->token : NULL);
 
-  /* Special form: set :: <lvalue> <value>
-Supports:
-set :: name value
-set :: $name value
-set :: $list[index] value
-Falls back to regular command dispatch for indirect names. */
+  // Special form: set :: <lvalue> <value>
+  // Supports:
+  // set :: name value
+  // set :: $name value
+  // set :: $list[index] value
+  // Falls back to regular command dispatch for indirect names.
   if (s_expr_is_lit_string(e->as.command.head, "set") && e->as.command.argc == 2u)
   {
     const MiExprList* it = e->as.command.args;
@@ -600,7 +598,7 @@ Falls back to regular command dispatch for indirect names. */
       return dst;
     }
 
-    /* lvalue: bare name */
+    // lvalue: bare name 
     if (lvalue->kind == MI_EXPR_STRING_LITERAL)
     {
       uint8_t rhs_reg = s_compile_expr(b, rhs);
@@ -613,7 +611,7 @@ Falls back to regular command dispatch for indirect names. */
       return dst;
     }
 
-    /* lvalue: $name (direct only) */
+    // lvalue: $name (direct only) 
     if (lvalue->kind == MI_EXPR_VAR && !lvalue->as.var.is_indirect)
     {
       uint8_t rhs_reg = s_compile_expr(b, rhs);
@@ -626,22 +624,22 @@ Falls back to regular command dispatch for indirect names. */
       return dst;
     }
 
-    
-/* lvalue: target::member */
-if (lvalue->kind == MI_EXPR_QUAL)
-{
-  uint8_t base_reg = s_compile_expr(b, lvalue->as.qual.target);
-  uint8_t rhs_reg = s_compile_expr(b, rhs);
-  int32_t sym = s_chunk_add_symbol(b->chunk, lvalue->as.qual.member);
-  s_emit(b, MI_VM_OP_STORE_MEMBER, rhs_reg, base_reg, 0, sym);
-  if (wants_result)
-  {
-    s_emit(b, MI_VM_OP_MOV, dst, rhs_reg, 0, 0);
-  }
-  return dst;
-}
 
-/* lvalue: $target[index] */
+    // lvalue: target::member 
+    if (lvalue->kind == MI_EXPR_QUAL)
+    {
+      uint8_t base_reg = s_compile_expr(b, lvalue->as.qual.target);
+      uint8_t rhs_reg = s_compile_expr(b, rhs);
+      int32_t sym = s_chunk_add_symbol(b->chunk, lvalue->as.qual.member);
+      s_emit(b, MI_VM_OP_STORE_MEMBER, rhs_reg, base_reg, 0, sym);
+      if (wants_result)
+      {
+        s_emit(b, MI_VM_OP_MOV, dst, rhs_reg, 0, 0);
+      }
+      return dst;
+    }
+
+    // lvalue: $target[index] 
     if (lvalue->kind == MI_EXPR_INDEX)
     {
       uint8_t base_reg = s_compile_expr(b, lvalue->as.index.target);
@@ -655,11 +653,11 @@ if (lvalue->kind == MI_EXPR_QUAL)
       return dst;
     }
 
-    /* Indirect or unsupported lvalue: fall back to command call. */
+    // Indirect or unsupported lvalue: fall back to command call. 
   }
 
-  /* Special form: call :: <block>
-     This compiles to a direct CALL_BLOCK, bypassing command dispatch. */
+  // Special form: call :: <block>
+  // This compiles to a direct CALL_BLOCK, bypassing command dispatch.
   if (e->as.command.head &&
       e->as.command.head->kind == MI_EXPR_STRING_LITERAL &&
       s_slice_eq(e->as.command.head->as.string_lit.value, x_slice_from_cstr("call")) &&
@@ -671,17 +669,16 @@ if (lvalue->kind == MI_EXPR_QUAL)
     return dst;
   }
 
-  /* Special form: cmd: <name> <param_name_0> ... <param_name_n> { ... }
-     Lowered without creating a runtime list/dict for the parameter list.
-Emits: CALL cmd with args = (name, param_name..., body_block).
-NOTE: This is NOT a general variadic handler; it only matches when the last
-argument is a block.
-*/
+  // Special form: cmd: <name> <param_name_0> ... <param_name_n> { ... }
+  // Lowered without creating a runtime list/dict for the parameter list.
+  // Emits: CALL cmd with args = (name, param_name..., body_block).
+  // NOTE: This is NOT a general variadic handler; it only matches when the last
+  // argument is a block.
   if (s_expr_is_lit_string(e->as.command.head, "cmd") && e->as.command.argc >= 2u)
   {
     const MiExprList* it = e->as.command.args;
     const MiExpr* cmd_name_expr = it ? it->expr : NULL;
-    /* params are everything except first (name) and last (body) */
+    // params are everything except first (name) and last (body) 
     const MiExprList* params_it = it ? it->next : NULL;
     const MiExpr* body_expr = NULL;
     if (e->as.command.argc >= 1u)
@@ -704,7 +701,7 @@ argument is a block.
 
     if (body_expr->kind != MI_EXPR_BLOCK)
     {
-      /* Not the special form; fall through to normal command compilation. */
+      // Not the special form; fall through to normal command compilation. 
       goto cmd_special_form_done;
     }
 
@@ -725,13 +722,13 @@ argument is a block.
       return dst;
     }
 
-    /* Evaluate and push arguments on the arg stack. */
+    // Evaluate and push arguments on the arg stack. 
     s_emit(b, MI_VM_OP_ARG_CLEAR, 0, 0, 0, 0);
     argc = 0;
 
-    /* cmd name is usually a literal identifier; push it as a symbol name
-       without going through the const pool, so dumps stay readable and
-       bytecode stays tight. */
+    // cmd name is usually a literal identifier; push it as a symbol name
+    // without going through the const pool, so dumps stay readable and
+    // bytecode stays tight.
     if (cmd_name_expr->kind == MI_EXPR_STRING_LITERAL)
     {
       int32_t sym = s_chunk_add_symbol(b->chunk, cmd_name_expr->as.string_lit.value);
@@ -745,7 +742,7 @@ argument is a block.
       argc += 1;
     }
 
-    /* Push parameter names (raw expressions) in order. */
+    // Push parameter names (raw expressions) in order. 
     const MiExprList* cur = params_it;
     while (cur && cur->next)
     {
@@ -776,10 +773,10 @@ argument is a block.
 
 cmd_special_form_done:
 
-  /* Special form: break ::
-     Only valid inside a VM-compiled loop that supports break/continue.
-     Emits an unconditional jump to the loop end, plus any required
-     scope cleanup. */
+  // Special form: break 
+  // Only valid inside a VM-compiled loop that supports break/continue.
+  // Emits an unconditional jump to the loop end, plus any required
+  // scope cleanup.
   if (s_expr_is_lit_string(e->as.command.head, "break"))
   {
     if (b->loop_depth <= 0)
@@ -801,9 +798,9 @@ cmd_special_form_done:
 
     int idx = b->loop_depth - 1;
 
-    /* Pop all compiler-emitted inlined scopes down to the loop's base depth.
-       This correctly handles break/continue from inside nested inlined blocks
-       (e.g. an `if` body inside a `while` body). */
+    // Pop all compiler-emitted inlined scopes down to the loop's base depth.
+    // This correctly handles break/continue from inside nested inlined blocks
+    // (e.g. an `if` body inside a `while` body).
     {
       int pops = b->inline_scope_depth - b->loops[idx].scope_base_depth;
       if (pops > 0)
@@ -820,8 +817,8 @@ cmd_special_form_done:
     return dst;
   }
 
-  /* Special form: continue ::
-     Jumps to loop start, plus any required scope cleanup. */
+  // Special form: continue
+  // Jumps to loop start, plus any required scope cleanup.
   if (s_expr_is_lit_string(e->as.command.head, "continue"))
   {
     if (b->loop_depth <= 0)
@@ -860,10 +857,10 @@ cmd_special_form_done:
     return dst;
   }
 
-  /* Special form: return :: <expr>?
-     Returns from the current chunk early. This is mainly useful inside
-     blocks called via CALL_BLOCK, but also works at top level.
-     Any compiler-emitted inlined scopes are cleaned up first. */
+  // Special form: return <expr>
+  // Returns from the current chunk early. This is mainly useful inside
+  // blocks called via CALL_BLOCK, but also works at top level.
+  // Any compiler-emitted inlined scopes are cleaned up first.
   if (s_expr_is_lit_string(e->as.command.head, "return"))
   {
     const MiExprList* it = e->as.command.args;
@@ -890,10 +887,10 @@ cmd_special_form_done:
     return dst;
   }
 
-  /* Special form: if/elseif/else
-     Grammar (command args):
-     if :: <cond> <then_block> ("elseif" <cond> <block>)* ("else" <block>)?
-Note: "elseif"/"else" are plain string literal tokens in the AST. */
+  // Special form: if/elseif/else
+  // Grammar (command args):
+  // if :: <cond> <then_block> ("elseif" <cond> <block>)* ("else" <block>)?
+  // Note: "elseif"/"else" are plain string literal tokens in the AST.
   if (s_expr_is_lit_string(e->as.command.head, "if"))
   {
     const MiExprList* it = e->as.command.args;
@@ -914,7 +911,7 @@ Note: "elseif"/"else" are plain string literal tokens in the AST. */
       return dst;
     }
 
-    /* We'll patch all jumps to the end once we know where it is. */
+    // We'll patch all jumps to the end once we know where it is. 
     size_t end_jumps[64];
     size_t end_jump_count = 0;
 
@@ -922,7 +919,7 @@ Note: "elseif"/"else" are plain string literal tokens in the AST. */
     {
       uint8_t cond_reg = s_compile_expr(b, cond);
 
-      /* JF cond, <to next branch> */
+      // JF cond, <to next branch> 
       size_t jf_index = b->chunk->code_count;
       s_emit(b, MI_VM_OP_JUMP_IF_FALSE, cond_reg, 0, 0, 0);
 
@@ -947,26 +944,26 @@ Note: "elseif"/"else" are plain string literal tokens in the AST. */
         s_emit(b, MI_VM_OP_CALL_BLOCK, dst, block_reg, 0, 0);
       }
 
-      /* JMP <to end> */
+      // JMP <to end> 
       if (end_jump_count < (sizeof(end_jumps) / sizeof(end_jumps[0])))
       {
         end_jumps[end_jump_count++] = b->chunk->code_count;
       }
       s_emit(b, MI_VM_OP_JUMP, 0, 0, 0, 0);
 
-      /* Patch JF to jump here (start of the next branch parsing/emit). */
+      // Patch JF to jump here (start of the next branch parsing/emit). 
       {
         int32_t rel = (int32_t)((int64_t)b->chunk->code_count - (int64_t)(jf_index + 1u));
         s_chunk_patch_imm(b->chunk, jf_index, rel);
       }
 
-      /* No more tokens: done. */
+      // No more tokens: done. 
       if (!it)
       {
         break;
       }
 
-      /* elseif / else markers */
+      // elseif / else markers 
       if (s_expr_is_lit_string(it->expr, "elseif"))
       {
         it = it->next;
@@ -1016,12 +1013,12 @@ Note: "elseif"/"else" are plain string literal tokens in the AST. */
         break;
       }
 
-      /* Unexpected trailing tokens, ignore. */
+      // Unexpected trailing tokens, ignore. 
       mi_error("if: unexpected tokens after then block\n");
       break;
     }
 
-    /* Patch all end jumps to jump here (end label). */
+    // Patch all end jumps to jump here (end label). 
     for (size_t i = 0; i < end_jump_count; ++i)
     {
       size_t jmp_index = end_jumps[i];
@@ -1032,17 +1029,17 @@ Note: "elseif"/"else" are plain string literal tokens in the AST. */
     return dst;
   }
 
-  /* Special form: while
-     Grammar (command args):
-     while :: <cond> <body_block>
-     Compiles to:
-loop_start:
-<cond>
-JF cond, loop_end
-CALL_BLOCK body
-JMP loop_start
-loop_end:
-*/
+  // Special form: while
+  // Grammar (command args):
+  // while <cond> <body_block>
+  // Compiles to:
+  // loop_start:
+  // <cond>
+  // JF cond, loop_end
+  // CALL_BLOCK body
+  // JMP loop_start
+  // loop_end:
+
   if (s_expr_is_lit_string(e->as.command.head, "while"))
   {
     const MiExprList* it = e->as.command.args;
@@ -1070,13 +1067,13 @@ loop_end:
 
     uint8_t cond_reg = s_compile_expr(b, cond);
 
-    /* JF cond, <to loop end> */
+    // JF cond, <to loop end> 
     size_t jf_index = b->chunk->code_count;
     s_emit(b, MI_VM_OP_JUMP_IF_FALSE, cond_reg, 0, 0, 0);
 
-    /* Inline the block body so break/continue can be compiled to jumps.
-       We still preserve block semantics by creating a fresh scope per
-       iteration (variables created inside the body do not leak). */
+    // Inline the block body so break/continue can be compiled to jumps.
+    // We still preserve block semantics by creating a fresh scope per
+    // iteration (variables created inside the body do not leak). 
     int loop_scope_base = b->inline_scope_depth;
     s_emit(b, MI_VM_OP_SCOPE_PUSH, 0, 0, 0, 0);
     b->inline_scope_depth += 1;
@@ -1105,7 +1102,7 @@ loop_end:
     s_emit(b, MI_VM_OP_SCOPE_POP, 0, 0, 0, 0);
     b->inline_scope_depth -= 1;
 
-    /* JMP back to loop_start */
+    // JMP back to loop_start 
     size_t jmp_index = b->chunk->code_count;
     s_emit(b, MI_VM_OP_JUMP, 0, 0, 0, 0);
     {
@@ -1113,16 +1110,16 @@ loop_end:
       s_chunk_patch_imm(b->chunk, jmp_index, rel_back);
     }
 
-    /* loop_end label is here */
+    // loop_end label is here 
     size_t loop_end = b->chunk->code_count;
 
-    /* Patch JF to jump to loop_end */
+    // Patch JF to jump to loop_end 
     {
       int32_t rel_end = (int32_t)((int64_t)loop_end - (int64_t)(jf_index + 1u));
       s_chunk_patch_imm(b->chunk, jf_index, rel_end);
     }
 
-    /* Patch break jumps to loop_end */
+    // Patch break jumps to loop_end 
     if (loop_idx >= 0)
     {
       for (size_t bi = 0; bi < b->loops[loop_idx].break_jump_count; ++bi)
@@ -1139,28 +1136,28 @@ loop_end:
 
   /* Special form: foreach
      Grammar (command args):
-foreach : <varname> <expr_list> <body_block>
+    foreach : <varname> <expr_list> <body_block>
 
-Notes:
-- <varname> must be a literal identifier (string literal).
-- <expr_list> is evaluated once.
-- The body is inlined so break/continue compile to jumps.
-- A fresh scope is created for each iteration.
+    Notes:
+    - <varname> must be a literal identifier (string literal).
+    - <expr_list> is evaluated once.
+    - The body is inlined so break/continue compile to jumps.
+    - A fresh scope is created for each iteration.
 
-Compiles to:
-list = <expr_list>
-len = LEN(list)
-idx = -1
-inc_label:
-idx = idx + 1
-cond = idx < len
-JF cond, end
-SCOPE_PUSH
-<varname> = INDEX(list, idx)
-<body>
-SCOPE_POP
-JMP inc_label
-end:
+    Compiles to:
+    list = <expr_list>
+    len = LEN(list)
+    idx = -1
+    inc_label:
+    idx = idx + 1
+    cond = idx < len
+    JF cond, end
+    SCOPE_PUSH
+    <varname> = INDEX(list, idx)
+    <body>
+    SCOPE_POP
+    JMP inc_label
+    end:
 */
   if (s_expr_is_lit_string(e->as.command.head, "foreach"))
   {
@@ -1204,7 +1201,7 @@ end:
       return dst;
     }
 
-    /* Result of foreach is void when used as an expression. */
+    // Result of foreach is void when used as an expression. 
     if (wants_result)
     {
       s_emit(b, MI_VM_OP_LOAD_CONST, dst, 0, 0, s_chunk_add_const(b->chunk, mi_rt_make_void()));
@@ -1212,14 +1209,12 @@ end:
 
     int32_t foreach_sym = s_chunk_add_symbol(b->chunk, varname_expr->as.string_lit.value);
 
-    /*
-       In Minima, bare identifiers are parsed as string literals.
-       For foreach, allow iterating a variable by writing its name
-       directly (no '$'):
-foreach : x xs { ... }
-This keeps foreach ergonomic without changing identifier rules
-globally.
-*/
+    // In Minima, bare identifiers are parsed as string literals.
+    // For foreach, allow iterating a variable by writing its name
+    // directly (no '$'):
+    // foreach : x xs { ... }
+    // This keeps foreach ergonomic without changing identifier rules
+    // globally.
     uint8_t container_reg = 0;
     if (list_expr->kind == MI_EXPR_STRING_LITERAL)
     {
@@ -1241,7 +1236,7 @@ globally.
     uint8_t item_reg = s_alloc_reg(b);
     s_emit(b, MI_VM_OP_ITER_NEXT, cond_reg, container_reg, idx_reg, (int32_t)item_reg);
 
-    /* JF cond, <to end> */
+    // JF cond, <to end> 
     size_t jf_index = b->chunk->code_count;
     s_emit(b, MI_VM_OP_JUMP_IF_FALSE, cond_reg, 0, 0, 0);
 
@@ -1263,7 +1258,7 @@ globally.
       mi_error("foreach: loop nesting too deep\n");
     }
 
-    /* foreach var = item (local bind) */
+    // foreach var = item (local bind) 
     s_emit(b, MI_VM_OP_DEFINE_VAR, item_reg, 0, 0, foreach_sym);
 
     uint8_t saved_reg_base = b->reg_base;
@@ -1276,7 +1271,7 @@ globally.
     s_emit(b, MI_VM_OP_SCOPE_POP, 0, 0, 0, 0);
     b->inline_scope_depth -= 1;
 
-    /* JMP back to loop_label */
+    // JMP back to loop_label 
     {
       size_t jmp_index = b->chunk->code_count;
       s_emit(b, MI_VM_OP_JUMP, 0, 0, 0, 0);
@@ -1286,13 +1281,13 @@ globally.
 
     size_t loop_end = b->chunk->code_count;
 
-    /* Patch JF to jump to loop_end */
+    // Patch JF to jump to loop_end 
     {
       int32_t rel_end = (int32_t)((int64_t)loop_end - (int64_t)(jf_index + 1u));
       s_chunk_patch_imm(b->chunk, jf_index, rel_end);
     }
 
-    /* Patch break jumps to loop_end */
+    // Patch break jumps to loop_end 
     if (loop_idx >= 0)
     {
       for (size_t bi = 0; bi < b->loops[loop_idx].break_jump_count; ++bi)
@@ -1307,7 +1302,7 @@ globally.
     return dst;
   }
 
-  /* Regular command call: it uses the argument stack. */
+  // Regular command call: it uses the argument stack. 
   bool preserve_args = (b->arg_expr_depth > 0);
   if (preserve_args)
   {
@@ -1320,7 +1315,7 @@ globally.
   {
     const MiExpr* arg = it->expr;
 
-    /* Fast-path: literal constants can be pushed directly. */
+    // Fast-path: literal constants can be pushed directly. 
     if (arg && (arg->kind == MI_EXPR_INT_LITERAL ||
           arg->kind == MI_EXPR_FLOAT_LITERAL ||
           arg->kind == MI_EXPR_BOOL_LITERAL ||
@@ -1341,7 +1336,7 @@ globally.
       continue;
     }
 
-    /* Fast-path: direct variable reference (non-indirect) can be pushed without staging. */
+    // Fast-path: direct variable reference (non-indirect) can be pushed without staging. 
     if (arg && arg->kind == MI_EXPR_VAR && !arg->as.var.is_indirect)
     {
       int32_t sym = s_chunk_add_symbol(b->chunk, arg->as.var.name);
@@ -1351,9 +1346,9 @@ globally.
       continue;
     }
 
-    /* Fallback: compute into a register then push.
-Note: command expressions nested inside other command argument lists
-must preserve the arg stack (ARG_SAVE/ARG_RESTORE). */
+    // Fallback: compute into a register then push.
+    // Note: command expressions nested inside other command argument lists
+    // must preserve the arg stack (ARG_SAVE/ARG_RESTORE).
     b->arg_expr_depth += 1;
     uint8_t r = s_compile_expr(b, arg);
     b->arg_expr_depth -= 1;
@@ -1368,8 +1363,8 @@ must preserve the arg stack (ARG_SAVE/ARG_RESTORE). */
     XSlice name = head->as.string_lit.value;
     if (s_slice_has_double_colon(name))
     {
-      /* Qualified name: keep current behavior (resolved at runtime).
-         We'll add a fast-path for :: after command unification is stable. */
+      // Qualified name: keep current behavior (resolved at runtime).
+      // We'll add a fast-path for :: after command unification is stable.
       int32_t cmd_id = s_chunk_add_cmd_target(b->chunk, name, NULL);
       s_emit(b, MI_VM_OP_CALL_CMD, dst, argc, 0, cmd_id);
     }
@@ -1388,7 +1383,7 @@ must preserve the arg stack (ARG_SAVE/ARG_RESTORE). */
         {
           mi_rt_value_release(b->vm->rt, cmd_v);
         }
-        /* Late-bound identifier head (call-by-value). */
+        // Late-bound identifier head (call-by-value). 
         uint8_t head_reg = s_alloc_reg(b);
         int32_t sym = s_chunk_add_symbol(b->chunk, name);
         s_emit(b, MI_VM_OP_LOAD_VAR, head_reg, 0, 0, sym);
@@ -1447,8 +1442,8 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
     case MI_EXPR_STRING_LITERAL:
       {
         uint8_t r = s_alloc_reg(b);
-        /* Use the token lexeme as the source of truth for the slice.
-           Some earlier AST transforms may not preserve as.string_lit.value reliably. */
+        // Use the token lexeme as the source of truth for the slice.
+        // Some earlier AST transforms may not preserve as.string_lit.value reliably.
         int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_string_slice(e->token.lexeme));
         s_emit(b, MI_VM_OP_LOAD_CONST, r, 0, 0, k);
         return r;
@@ -1480,10 +1475,10 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
           return r;
         }
 
-        /* If this identifier matches a typed `func` declared in this script,
-           treat it as a first-class function value. The current runtime
-           representation is the command name string, so that dynamic calls
-           work without VM changes. */
+        // If this identifier matches a typed `func` declared in this script,
+        // treat it as a first-class function value. The current runtime
+        // representation is the command name string, so that dynamic calls
+        // work without VM changes.
         if (s_build_is_func_name(b, e->as.var.name))
         {
           int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_string_slice(e->as.var.name));
@@ -1531,11 +1526,16 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
     case MI_EXPR_BLOCK:
       {
         uint8_t r = s_alloc_reg(b);
+        // Block literals (including function bodies lowered to blocks) are
+        // already validated by the top-level typecheck pass. Re-typechecking
+        // nested scripts in isolation would lose function-context typing
+        // (e.g. arg(i) inside a func body) and outer-scope information.
         MiVmChunk* sub = s_vm_compile_script_ast(b->vm,
             e->as.block.script,
             NULL,
             x_slice_from_cstr("<block>"),
-            b->chunk ? b->chunk->dbg_file : x_slice_empty());
+            b->chunk ? b->chunk->dbg_file : x_slice_empty(),
+            true);
         if (!sub)
         {
           int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
@@ -1565,10 +1565,10 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
 
     case MI_EXPR_DICT:
       {
-        /* Native dict literal.
-           The parser produces MI_EXPR_DICT with MI_EXPR_PAIR items.
-           We lower directly to a dict allocation followed by STORE_INDEX
-           for each entry, avoiding intermediate list construction. */
+        // Native dict litera
+        // The parser produces MI_EXPR_DICT with MI_EXPR_PAIR items.
+        // We lower directly to a dict allocation followed by STORE_INDEX
+        // for each entry, avoiding intermediate list construction.
 
         uint8_t dict_reg = s_alloc_reg(b);
         s_emit(b, MI_VM_OP_DICT_NEW, dict_reg, 0, 0, 0);
@@ -1596,9 +1596,9 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
     case MI_EXPR_PAIR:
 
       {
-        /* Pairs are not a standalone runtime type. The parser only produces
-           MI_EXPR_PAIR inside MI_EXPR_DICT; encountering it here means the AST
-           was malformed or built manually. */
+        // Pairs are not a standalone runtime type. The parser only produces
+        // MI_EXPR_PAIR inside MI_EXPR_DICT; encountering it here means the AST
+        // was malformed or built manually.
         mi_error("pair literal used outside dict literal\n");
         uint8_t r = s_alloc_reg(b);
         int32_t k = s_chunk_add_const(b->chunk, mi_rt_make_void());
@@ -1626,7 +1626,7 @@ static uint8_t s_compile_expr(MiVmBuild* b, const MiExpr* e)
   }
 }
 
-static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XArena* arena, XSlice dbg_name, XSlice dbg_file)
+static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XArena* arena, XSlice dbg_name, XSlice dbg_file, bool skip_typecheck)
 {
   (void) arena;
 
@@ -1635,9 +1635,10 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
     return NULL;
   }
 
+  if (!skip_typecheck)
   {
     MiTypecheckError tc;
-    if (!mi_typecheck_script(script, &tc))
+    if (!mi_typecheck_script(script, vm, dbg_file, &tc))
     {
       if (tc.line > 0)
       {
@@ -1651,14 +1652,15 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
     }
   }
 
-  /* Ensure the VM pipeline gets a folded AST. This is a pure simplification
-     pass; it will not execute variables or commands. */
+  // Ensure the VM pipeline gets a folded AST. This is a pure simplification
+  // pass; it will not execute variables or commands.
   mi_fold_constants_ast(NULL, script);
 
   MiVmChunk* chunk = s_chunk_create();
 
-  /* Attach debug identity to the chunk. This also enables per-instruction
-     dbg_lines/dbg_cols emission via s_chunk_emit_loc(). */
+  // Attach debug identity to the chunk. This also enables per-instruction
+  // dbg_lines/dbg_cols emission via s_chunk_emit_loc().
+
   chunk->dbg_name = s_slice_dup_heap(dbg_name);
   chunk->dbg_file = s_slice_dup_heap(dbg_file);
 
@@ -1668,10 +1670,10 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
   b.chunk = chunk;
   b.next_reg = 0;
 
-  /* Collect names of typed `func` declarations in this script.
-     These are lowered to cmd(...) for runtime, but we keep their names
-     so that `foo` can be used as a first-class value (currently a string
-     command name) in expression positions. */
+  // Collect names of typed `func` declarations in this script.
+  // These are lowered to cmd(...) for runtime, but we keep their names
+  // so that `foo` can be used as a first-class value (currently a string
+  // command name) in expression positions.
   {
     const MiCommandList* fit = script ? script->first : NULL;
     while (fit)
@@ -1690,15 +1692,15 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
   //----------------------------------------------------------
   // include/import validations (top-level only)
   //----------------------------------------------------------
-  /*
-    Validations (top-level only):
-      1) include "foo" as foo; repeated -> warning (redundant)
-      2) include "foo" as a; include "foo" as b; -> ok (aliasing)
-      3) include "foo" as x; include "bar" as x; -> error (conflicting alias)
-
-    We only apply these validations to the include/import statement sugar
-    (MiCommand.is_include_stmt), which always uses a string-literal path.
-  */
+  /**
+   * Validations (top-level only):
+   *   1) include "foo" as foo; repeated -> warning (redundant)
+   *   2) include "foo" as a; include "foo" as b; -> ok (aliasing)
+   *   3) include "foo" as x; include "bar" as x; -> error (conflicting alias)
+   *
+   * We only apply these validations to the include statement sugar
+   * (MiCommand.is_include_stmt), which always uses a string-literal path.
+   */
   typedef struct MiIncludeAliasEntry
   {
     XSlice  alias;
@@ -1723,7 +1725,7 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
         const XSlice path = path_expr ? path_expr->token.lexeme : x_slice_empty();
         const XSlice alias = vcmd->include_alias_tok.lexeme;
 
-        /* Find existing alias binding, if any. */
+        // Find existing alias binding, if any. 
         size_t found = (size_t)-1;
         for (size_t i = 0; i < include_alias_count; i += 1)
         {
@@ -1739,7 +1741,7 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
           const MiIncludeAliasEntry* prev = &include_aliases[found];
           if (!x_slice_eq(prev->path, path))
           {
-            /* Conflicting alias: different modules bound to same alias. */
+            // Conflicting alias: different modules bound to same alias
             if (dbg_file.length > 0)
             {
               mi_error_fmt("%.*s:%d:%d: error: alias '%.*s' already bound to module \"%.*s\"\n",
@@ -1772,7 +1774,7 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
             return NULL;
           }
 
-          /* Same module + same alias => warn once per repeat site. */
+          // Same module + same alias => warn once per repeat site. 
           if (dbg_file.length > 0)
           {
             mi_warning_fmt("%.*s:%d:%d: warning: module \"%.*s\" included more than once with alias '%.*s'\n",
@@ -1832,12 +1834,13 @@ static MiVmChunk* s_vm_compile_script_ast(MiVm* vm, const MiScript* script, XAre
     const MiCommand* cmd = it->command;
     b.next_reg = 0;
 
-    /* include/import statement sugar:
-         include "..." as name;
-       Lowers to:
-         r0 = include("...")
-         name = r0
-       This keeps the runtime include command simple (no "as" argument). */
+    //include/import statement sugar:
+    // include "..." as name;
+    //Lowers to:
+    // r0 = include("...")
+    // name = r0
+    //This keeps the runtime include command simple (no "as" argument).
+
     if (cmd && cmd->is_include_stmt)
     {
       MiExpr fake;
@@ -1878,7 +1881,7 @@ MiVmChunk* mi_compile_vm_script(MiVm* vm, const MiScript* script)
   {
     return NULL;
   }
-  return s_vm_compile_script_ast(vm, script, NULL, x_slice_empty(), x_slice_empty());
+  return s_vm_compile_script_ast(vm, script, NULL, x_slice_empty(), x_slice_empty(), false);
 }
 
 MiVmChunk* mi_compile_vm_script_ex(MiVm* vm, const MiScript* script, XSlice dbg_name, XSlice dbg_file)
@@ -1888,5 +1891,5 @@ MiVmChunk* mi_compile_vm_script_ex(MiVm* vm, const MiScript* script, XSlice dbg_
     return NULL;
   }
 
-  return s_vm_compile_script_ast(vm, script, NULL, dbg_name, dbg_file);
+  return s_vm_compile_script_ast(vm, script, NULL, dbg_name, dbg_file, false);
 }

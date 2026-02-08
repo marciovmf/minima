@@ -373,10 +373,10 @@ static MiToken s_lexer_next(MiLexer* lx)
     if (x_slice_eq_cstr(s, "import")) return s_make_token(MI_TOK_IMPORT, start, len, line, column);
     if (x_slice_eq_cstr(s, "return")) return s_make_token(MI_TOK_RETURN, start, len, line, column);
     if (x_slice_eq_cstr(s, "let")) return s_make_token(MI_TOK_LET, start, len, line, column);
-if (x_slice_eq_cstr(s, "if")) return s_make_token(MI_TOK_IF, start, len, line, column);
-if (x_slice_eq_cstr(s, "else")) return s_make_token(MI_TOK_ELSE, start, len, line, column);
-if (x_slice_eq_cstr(s, "while")) return s_make_token(MI_TOK_WHILE, start, len, line, column);
-if (x_slice_eq_cstr(s, "foreach")) return s_make_token(MI_TOK_FOREACH, start, len, line, column);
+    if (x_slice_eq_cstr(s, "if")) return s_make_token(MI_TOK_IF, start, len, line, column);
+    if (x_slice_eq_cstr(s, "else")) return s_make_token(MI_TOK_ELSE, start, len, line, column);
+    if (x_slice_eq_cstr(s, "while")) return s_make_token(MI_TOK_WHILE, start, len, line, column);
+    if (x_slice_eq_cstr(s, "foreach")) return s_make_token(MI_TOK_FOREACH, start, len, line, column);
     if (x_slice_eq_cstr(s, "true")) return s_make_token(MI_TOK_TRUE, start, len, line, column);
     if (x_slice_eq_cstr(s, "false")) return s_make_token(MI_TOK_FALSE, start, len, line, column);
     if (x_slice_eq_cstr(s, "void")) return s_make_token(MI_TOK_VOID, start, len, line, column);
@@ -678,7 +678,7 @@ static MiExpr* s_parse_primary(MiParser* p)
     return e;
   }
 
-  
+
   // list/dict literal:
   //   list: '[' [expr (',' expr)* [',']] ']'
   //   dict: '[' [pair (',' pair)* [',']] ']'
@@ -823,11 +823,11 @@ static MiExpr* s_parse_primary(MiParser* p)
   if (s_parser_match(p, MI_TOK_IDENTIFIER))
   {
     MiToken ident = s_parser_prev(p);
-    /* If the identifier is immediately followed by '(', treat it as a command head.
-       This preserves Minima's "command head must be string" rule for calls like foo(...).
-NOTE: Calling a block-valued variable with x() will require a different syntax;
-x() currently always resolves as a command call head.
-*/
+    // If the identifier is immediately followed by '(', treat it as a command head.
+    // This preserves Minima's "command head must be string" rule for calls like foo(...).
+    // NOTE: Calling a block-valued variable with x() will require a different syntax;
+    // x() currently always resolves as a command call head.
+
     if (s_parser_peek(p).kind == MI_TOK_LPAREN)
     {
       return s_ident_as_string(p, ident);
@@ -1103,7 +1103,7 @@ static MiCommand* s_parse_func_decl(MiParser* p)
   {
     for (;;)
     {
-      /* Variadic marker: ... or ...:Type (must be last). */
+      // Variadic marker: ... or ...:Type (must be last). 
       if (p->current.kind == MI_TOK_ELLIPSIS)
       {
         (void)s_parser_advance(p);
@@ -1137,17 +1137,17 @@ static MiCommand* s_parse_func_decl(MiParser* p)
 
       // Optional :type
       MiTypeKind param_type = MI_TYPE_ANY;
-MiFuncTypeSig* param_func_sig = NULL;
-MiToken type_tok = pt;
-if (s_parser_match(p, MI_TOK_COLON))
-{
-  type_tok = s_parser_peek(p);
-  s_parse_type_spec(p, &param_type, &param_func_sig);
-  if (p->had_error)
-  {
-    return NULL;
-  }
-}
+      MiFuncTypeSig* param_func_sig = NULL;
+      MiToken type_tok = pt;
+      if (s_parser_match(p, MI_TOK_COLON))
+      {
+        type_tok = s_parser_peek(p);
+        s_parse_type_spec(p, &param_type, &param_func_sig);
+        if (p->had_error)
+        {
+          return NULL;
+        }
+      }
 
       // Record parameter in signature.
       MiFuncParam* params_new = (MiFuncParam*)x_arena_alloc_zero(p->arena, sizeof(MiFuncParam) * (size_t)(sig->param_count + 1));
@@ -1223,9 +1223,9 @@ if (s_parser_match(p, MI_TOK_COLON))
     return NULL;
   }
 
-  /* Internal typed signature for cmd: [ret_type, fixed_count, t0..tN-1, variadic_type_or_-1].
-     This is used by the runtime to attach MiFuncTypeSig metadata to the created cmd.
-     It is created once at declaration time (NOT per call). */
+  // Internal typed signature for cmd: [ret_type, fixed_count, t0..tN-1, variadic_type_or_-1].
+  // This is used by the runtime to attach MiFuncTypeSig metadata to the created cmd.
+  // It is created once at declaration time (NOT per call).
   {
     MiToken itok;
     itok.kind = MI_TOK_INT;
@@ -1320,7 +1320,7 @@ static MiTypeKind s_parse_type_name(MiParser* p, MiToken type_tok)
 
 static MiFuncTypeSig* s_parse_func_type_sig(MiParser* p, MiToken func_tok)
 {
-  /* func with signature must have '(' */
+  // func with signature must have '(' 
   if (p->current.kind != MI_TOK_LPAREN)
   {
     return NULL;
@@ -1334,9 +1334,9 @@ static MiFuncTypeSig* s_parse_func_type_sig(MiParser* p, MiToken func_tok)
   }
 
   sig->func_tok = func_tok;
-  sig->lparen_tok = s_parser_advance(p); /* consume '(' */
+  sig->lparen_tok = s_parser_advance(p); // consume '(' 
 
-  /* Parse param types (can be empty). */
+  // Parse param types (can be empty). 
   MiTypeKind* tmp = NULL;
   int tmp_count = 0;
 
@@ -1384,7 +1384,7 @@ static MiFuncTypeSig* s_parse_func_type_sig(MiParser* p, MiToken func_tok)
   sig->is_variadic = false;
   sig->variadic_type = MI_TYPE_ANY;
 
-  /* Optional -> return type, default void. */
+  // Optional -> return type, default void. 
   sig->ret_type = MI_TYPE_VOID;
   sig->is_variadic = false;
   sig->variadic_type = MI_TYPE_ANY;
@@ -1700,6 +1700,8 @@ static MiCommand* s_parse_include_stmt(MiParser* p, MiToken kw_tok, const char* 
 {
   // include "path/to/file" as alias;
   // import  "path/to/file" as alias;
+  // include "path/to/file";
+  // import  "path/to/file";
 
   if (!s_parser_expect(p, MI_TOK_STRING, "Expected string literal after include/import"))
   {
@@ -1707,31 +1709,60 @@ static MiCommand* s_parse_include_stmt(MiParser* p, MiToken kw_tok, const char* 
   }
   MiToken path_tok = s_parser_prev(p);
 
-  if (!s_parser_expect(p, MI_TOK_IDENTIFIER, "Expected 'as' after include/import path"))
-  {
-    return NULL;
-  }
-  MiToken as_tok = s_parser_prev(p);
-  if (!x_slice_eq_cstr(as_tok.lexeme, "as"))
-  {
-    s_parser_set_error(p, "Expected 'as' after include/import path", as_tok);
-    return NULL;
-  }
+  MiToken alias_tok = {0};
 
-  if (!s_parser_expect(p, MI_TOK_IDENTIFIER, "Expected alias identifier after 'as'"))
+  // Optional: 'as <alias>' 
+  if (s_parser_peek(p).kind == MI_TOK_IDENTIFIER && x_slice_eq_cstr(s_parser_peek(p).lexeme, "as"))
   {
-    return NULL;
+    (void)s_parser_advance(p); // consume 'as'
+
+    if (!s_parser_expect(p, MI_TOK_IDENTIFIER, "Expected alias identifier after 'as'"))
+    {
+      return NULL;
+    }
+    alias_tok = s_parser_prev(p);
   }
-  MiToken alias_tok = s_parser_prev(p);
+  else
+  {
+    // Default alias is the basename of the include path (split on '/'
+    // Note: string token lexeme does not include quotes.
+    XSlice path = path_tok.lexeme;
+
+    size_t last_slash = (size_t)-1;
+    for (size_t i = 0; i < path.length; i += 1)
+    {
+      if (((const char*)path.ptr)[i] == '/')
+      {
+        last_slash = i;
+      }
+    }
+
+    XSlice base = path;
+    if (last_slash != (size_t)-1)
+    {
+      base.ptr = (const char*)path.ptr + (last_slash + 1);
+      base.length = path.length - (last_slash + 1);
+    }
+
+    if (base.length == 0)
+    {
+      s_parser_set_error(p, "Include/import path must not end with '/'", path_tok);
+      return NULL;
+    }
+
+    alias_tok = path_tok;
+    alias_tok.kind = MI_TOK_IDENTIFIER;
+    alias_tok.lexeme = base;
+  }
 
   if (!s_parser_expect(p, MI_TOK_SEMICOLON, "Expected ';' after include/import"))
   {
     return NULL;
   }
 
-  /* Represent this as a normal command call (include/import with one argument)
-     plus an alias token carried on the MiCommand node. The compiler will
-     lower it to: alias = include(path). */
+ // Represent this as a normal command call (include/import with one argument)
+ // plus an alias token carried on the MiCommand node. The compiler will
+ // lower it to: alias = include(path).
   MiExpr* head = s_cstr_as_string(p, head_name);
   if (!head) return NULL;
 

@@ -1,6 +1,9 @@
 #include "mi_heap.h"
 
 #include <string.h>
+#ifdef MI_HEAP_DEBUG
+#include <stdio.h>
+#endif
 
 #define MI_HEAP_SMALL_GRANULARITY 16u
 #define MI_HEAP_SMALL_MAX_BYTES   (MI_HEAP_SMALL_GRANULARITY * 256u)
@@ -192,7 +195,7 @@ static void* s_mi_heap_alloc_internal(MiHeap* h, MiObjKind kind, size_t payload_
   }
   else
   {
-    /* Reuse a freed block; clear payload bytes. */
+    // Reuse a freed block; clear payload bytes. 
     uint8_t* mem = (uint8_t*)hdr;
     if (hdr->total_size_bytes > header_size)
     {
@@ -236,6 +239,12 @@ void mi_heap_retain_payload(void* payload)
     return;
   }
   hdr->refcount += 1u;
+ 
+#ifdef MI_HEAP_DEBUG
+  printf("RETAIN %p kind = %d, count = %d, flags = %x\n",
+      payload, hdr->kind, hdr->refcount, hdr->flags);
+#endif
+
 }
 
 void mi_heap_release_payload(MiHeap* h, void* payload)
@@ -268,6 +277,13 @@ void mi_heap_release_payload(MiHeap* h, void* payload)
   hdr->flags |= MI_OBJ_FLAG_FREED;
   h->stats.bytes_live -= hdr->total_size_bytes;
   h->stats.free_count += 1u;
+
+
+#ifdef MI_HEAP_DEBUG
+  printf("RELEASE %p kind = %d, count = %d, flags = %x\n",
+      payload, hdr->kind, hdr->refcount, hdr->flags);
+#endif
+
   s_mi_heap_push_free(h, hdr);
 }
 

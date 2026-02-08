@@ -1,4 +1,23 @@
+#include <stdx_common.h>
 #include "mi_vm.h"
+
+
+static const MiVmApi s_vm_api =
+{
+  mi_rt_make_int,
+  mi_rt_make_float,
+  mi_rt_make_bool,
+  mi_rt_make_void,
+  mi_vm_trace_print,
+  mi_vm_register_native,
+  mi_vm_namespace_add_native,
+  mi_vm_register_native_sigv,
+  mi_vm_register_native_sigv_var,
+  mi_vm_namespace_add_native_sigv,
+  mi_vm_namespace_add_native_sigv_var,
+  mi_vm_namespace_add_value,
+};
+
 #include "mi_log.h"
 #include "mi_mx.h"
 #include "mi_compile.h"
@@ -6,9 +25,16 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 #include <stdx_io.h>
 #include <stdx_filesystem.h>
@@ -28,9 +54,8 @@ static XSlice s_vm_current_script_file(MiVm* vm)
     return vm->dbg_chunk->dbg_file;
   }
 
-  /* Some subchunks may not carry dbg_file; walk the VM call stack to find
-     the nearest caller chunk with a file name.
-  */
+  // Some subchunks may not carry dbg_file; walk the VM call stack to find
+  // the nearest caller chunk with a file name.
   for (int i = vm->call_depth - 1; i >= 0; --i)
   {
     const MiVmChunk* c = vm->call_stack[i].caller_chunk;
@@ -154,7 +179,7 @@ static void s_vm_report_error(MiVm* vm, const char* msg)
     mi_error_fmt("Runtime error: %s\n", msg ? msg : "error");
   }
 
-  /* Print call stack (most recent last). */
+  // Print call stack (most recent last). 
   if (vm->call_depth > 0)
   {
     mi_error("Call stack:\n");
@@ -354,7 +379,7 @@ static bool s_vm_check_sig(MiVm* vm, const MiFuncTypeSig* sig, XSlice cmd_name, 
     }
   }
 
-  /* Fixed params. */
+  // Fixed params. 
   for (int i = 0; i < sig->param_count && i < argc; ++i)
   {
     MiTypeKind expected = sig->param_types ? sig->param_types[i] : MI_TYPE_ANY;
@@ -370,7 +395,7 @@ static bool s_vm_check_sig(MiVm* vm, const MiFuncTypeSig* sig, XSlice cmd_name, 
     }
   }
 
-  /* Variadic tail. */
+  // Variadic tail. 
   if (sig->is_variadic && argc > sig->param_count)
   {
     MiTypeKind vt = sig->variadic_type;
@@ -414,7 +439,7 @@ static void s_vm_call_stack_push(MiVm* vm, MiVmCallFrameKind kind, XSlice name, 
   }
   if (vm->call_depth >= (int)MI_VM_CALL_STACK_MAX)
   {
-    /* Drop frames instead of crashing; trace becomes less useful but program runs. */
+    // Drop frames instead of crashing; trace becomes less useful but program runs. 
     return;
   }
 
@@ -935,7 +960,7 @@ static void s_vm_trace_print_frame(const MiVmChunk* chunk, size_t ip, const char
     (int)ins.imm);
 }
 
-static void s_vm_trace_print(MiVm* vm)
+void mi_vm_trace_print(MiVm* vm)
 {
   if (!vm)
   {
@@ -976,7 +1001,7 @@ static MiRtValue s_vm_cmd_trace(MiVm* vm, void* user, int argc, const MiRtValue*
     return mi_rt_make_void();
   }
 
-  s_vm_trace_print(vm);
+  mi_vm_trace_print(vm);
   return mi_rt_make_void();
 }
 
@@ -1195,6 +1220,13 @@ static MiRtValue s_vm_exec_cmd_value(MiVm* vm, XSlice cmd_name, MiRtValue cmd_va
   MiScopeFrame* caller = vm->rt->current;
   MiScopeFrame* parent = b->env ? b->env : caller;
 
+/* Preserve current call argument context so argc()/arg() inside the user command
+   refer to the arguments passed to this command call (not to nested builtins). */
+int saved_cur_argc = vm->cur_argc;
+const MiRtValue* saved_cur_argv = vm->cur_argv;
+vm->cur_argc = argc;
+vm->cur_argv = argv;
+
   /* Preserve VM-reserved regs across call (same as call:). */
   MiRtValue saved_vm_regs[7];
   for (int i = 0; i < 7; ++i)
@@ -1216,6 +1248,9 @@ static MiRtValue s_vm_exec_cmd_value(MiVm* vm, XSlice cmd_name, MiRtValue cmd_va
 
   mi_rt_scope_pop(vm->rt);
   vm->rt->current = caller;
+
+vm->cur_argc = saved_cur_argc;
+vm->cur_argv = saved_cur_argv;
 
   for (int i = 0; i < 7; ++i)
   {
@@ -1251,6 +1286,13 @@ static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value, const Mi
   MiScopeFrame* caller = vm->rt->current;
   MiScopeFrame* parent = b->env ? b->env : caller;
 
+/* Blocks have their own argument context (empty). Preserve outer context so
+   argc()/arg() inside the block do not accidentally observe caller args. */
+int saved_cur_argc = vm->cur_argc;
+const MiRtValue* saved_cur_argv = vm->cur_argv;
+vm->cur_argc = 0;
+vm->cur_argv = NULL;
+
   s_vm_call_stack_push(vm, MI_VM_CALL_FRAME_BLOCK, x_slice_init(NULL, 0), caller_chunk, caller_ip);
 
   /* CALL ABI:
@@ -1277,6 +1319,9 @@ static MiRtValue s_vm_exec_block_value(MiVm* vm, MiRtValue block_value, const Mi
     mi_rt_value_release(vm->rt, saved_vm_regs[i]);
   }
   s_vm_arg_clear(vm);
+
+  vm->cur_argc = saved_cur_argc;
+  vm->cur_argv = saved_cur_argv;
 
   s_vm_call_stack_pop(vm);
 
@@ -1783,6 +1828,13 @@ static MiRtValue s_vm_module_cache_get(MiVm* vm, const char* key, bool* out_foun
       {
         *out_found = true;
       }
+      /* include() convention: returned values are owned by the caller.
+         When the cache hits, return an extra retained reference so callers
+         can release safely without affecting the cache's own ownership. */
+      if (vm->rt)
+      {
+        mi_rt_value_retain(vm->rt, vm->module_cache[i].value);
+      }
       return vm->module_cache[i].value;
     }
   }
@@ -1801,6 +1853,12 @@ static void s_vm_module_cache_set(MiVm* vm, const char* key, MiRtValue value)
   {
     if (vm->module_cache[i].key && strcmp(vm->module_cache[i].key, key) == 0)
     {
+      /* Replace existing cached value, updating ownership. */
+      if (vm->rt)
+      {
+        mi_rt_value_release(vm->rt, vm->module_cache[i].value);
+        mi_rt_value_retain(vm->rt, value);
+      }
       vm->module_cache[i].value = value;
       return;
     }
@@ -1814,8 +1872,121 @@ static void s_vm_module_cache_set(MiVm* vm, const char* key, MiRtValue value)
   }
 
   vm->module_cache[vm->module_cache_count].key = s_strdup_arena(vm->perm_arena, key);
+  if (vm->rt)
+  {
+    mi_rt_value_retain(vm->rt, value);
+  }
   vm->module_cache[vm->module_cache_count].value = value;
   vm->module_cache_count += 1u;
+}
+
+
+static MiVmNativeDll* s_vm_native_dll_find(MiVm* vm, const char* path)
+{
+  if (!vm || !path)
+  {
+    return NULL;
+  }
+
+  for (size_t i = 0; i < vm->native_dll_count; ++i)
+  {
+    if (vm->native_dlls[i].path && strcmp(vm->native_dlls[i].path, path) == 0)
+    {
+      return &vm->native_dlls[i];
+    }
+  }
+
+  return NULL;
+}
+
+static MiVmNativeDll* s_vm_native_dll_get_or_load(MiVm* vm, const char* path)
+{
+  if (!vm || !path || !path[0])
+  {
+    return NULL;
+  }
+
+  MiVmNativeDll* hit = s_vm_native_dll_find(vm, path);
+  if (hit)
+  {
+    return hit;
+  }
+
+  void* handle = NULL;
+#ifdef _WIN32
+  handle = (void*)LoadLibraryA(path);
+#else
+  handle = dlopen(path, RTLD_NOW);
+#endif
+
+  if (!handle)
+  {
+#ifdef _WIN32
+    mi_error_fmt("include: failed to load dll: %s\n", path);
+#else
+    const char* e = dlerror();
+    mi_error_fmt("include: failed to load so: %s (%s)\n", path, e ? e : "unknown");
+#endif
+    return NULL;
+  }
+
+  MiModuleCountFn count_fn = NULL;
+  MiModuleNameFn name_fn = NULL;
+  MiModuleRegisterFn reg_fn = NULL;
+
+#ifdef _WIN32
+  count_fn = (MiModuleCountFn)GetProcAddress((HMODULE)handle, "mi_module_count");
+  name_fn = (MiModuleNameFn)GetProcAddress((HMODULE)handle, "mi_module_name");
+  reg_fn = (MiModuleRegisterFn)GetProcAddress((HMODULE)handle, "mi_module_register");
+#else
+  count_fn = (MiModuleCountFn)dlsym(handle, "mi_module_count");
+  name_fn = (MiModuleNameFn)dlsym(handle, "mi_module_name");
+  reg_fn = (MiModuleRegisterFn)dlsym(handle, "mi_module_register");
+#endif
+
+  if (!count_fn || !name_fn || !reg_fn)
+  {
+    mi_error_fmt("include: native module missing required exports: %s\n", path);
+#ifdef _WIN32
+    FreeLibrary((HMODULE)handle);
+#else
+    dlclose(handle);
+#endif
+    return NULL;
+  }
+
+  if (vm->native_dll_count == vm->native_dll_capacity)
+  {
+    size_t new_cap = vm->native_dll_capacity ? vm->native_dll_capacity * 2u : 8u;
+    vm->native_dlls = (MiVmNativeDll*)s_realloc(vm->native_dlls, new_cap * sizeof(*vm->native_dlls));
+    vm->native_dll_capacity = new_cap;
+  }
+
+  char* pcopy = NULL;
+  {
+    size_t n = strlen(path);
+    pcopy = (char*)x_arena_alloc(vm->perm_arena, n + 1);
+    if (!pcopy)
+    {
+#ifdef _WIN32
+      FreeLibrary((HMODULE)handle);
+#else
+      dlclose(handle);
+#endif
+      return NULL;
+    }
+    memcpy(pcopy, path, n + 1);
+  }
+
+  MiVmNativeDll* out = &vm->native_dlls[vm->native_dll_count];
+  memset(out, 0, sizeof(*out));
+  out->path = pcopy;
+  out->handle = handle;
+  out->module_count = count_fn;
+  out->module_name = name_fn;
+  out->module_register = reg_fn;
+  vm->native_dll_count += 1u;
+  return out;
 }
 
 static char* s_read_text_file_arena(XArena* arena, const char* path, size_t* out_len)
@@ -1970,6 +2141,143 @@ static bool s_vm_get_cache_root(MiVm* vm, XFSPath* out_root)
   return true;
 }
 
+static bool s_vm_get_modules_dir(MiVm* vm, XFSPath* out_dir)
+{
+  if (!out_dir)
+  {
+    return false;
+  }
+
+  if (vm && vm->modules_dir_set)
+  {
+    *out_dir = vm->modules_dir;
+    return true;
+  }
+
+  x_fs_cwd_get(out_dir);
+  return true;
+}
+
+
+static void s_vm_track_detached_env(MiVm* vm, MiScopeFrame* env);
+static MiRtValue s_vm_load_native_module(MiVm* vm, XSlice module_path)
+{
+  if (!vm || !vm->rt || !module_path.ptr || module_path.length == 0)
+  {
+    return mi_rt_make_void();
+  }
+
+  /* Parse: <dll>[/<module>] */
+  size_t slash = (size_t)-1;
+  for (size_t i = 0; i < module_path.length; ++i)
+  {
+    if (((const char*)module_path.ptr)[i] == '/')
+    {
+      slash = i;
+      break;
+    }
+  }
+
+  XSlice dll_name = module_path;
+  XSlice mod_name = module_path;
+  if (slash != (size_t)-1)
+  {
+    dll_name = x_slice_init(module_path.ptr, slash);
+    mod_name = x_slice_init((const char*)module_path.ptr + (slash + 1), module_path.length - (slash + 1));
+  }
+
+  if (!dll_name.length || !mod_name.length)
+  {
+    return mi_rt_make_void();
+  }
+
+  XFSPath modules_dir;
+  if (!s_vm_get_modules_dir(vm, &modules_dir))
+  {
+    return mi_rt_make_void();
+  }
+
+  const char* ext =
+#ifdef _WIN32
+    ".dll";
+#elif defined(__APPLE__)
+    ".dylib";
+#else
+    ".so";
+#endif
+
+  char dll_file[260];
+  if (dll_name.length >= sizeof(dll_file))
+  {
+    return mi_rt_make_void();
+  }
+  memcpy(dll_file, dll_name.ptr, dll_name.length);
+  dll_file[dll_name.length] = '\0';
+  (void)strncat(dll_file, ext, sizeof(dll_file) - 1);
+
+  XFSPath dll_path = modules_dir;
+  (void)x_fs_path_join(&dll_path, dll_file);
+  (void)x_fs_path_normalize(&dll_path);
+
+  if (!x_fs_path_exists(&dll_path))
+  {
+    return mi_rt_make_void();
+  }
+
+  MiVmNativeDll* dll = s_vm_native_dll_get_or_load(vm, dll_path.buf);
+  if (!dll)
+  {
+    return mi_rt_make_void();
+  }
+
+  char key[512];
+  key[0] = '\0';
+  (void)snprintf(key, sizeof(key), "native:%s::%.*s", dll_path.buf, (int)mod_name.length, (const char*)mod_name.ptr);
+
+  bool found = false;
+  MiRtValue cached = s_vm_module_cache_get(vm, key, &found);
+  if (found)
+  {
+    return cached;
+  }
+
+  /* Create module env + handle block (namespace container). */
+  MiScopeFrame* env = mi_rt_scope_create_detached(vm->rt, NULL);
+  if (!env)
+  {
+    return mi_rt_make_void();
+  }
+  s_vm_track_detached_env(vm, env);
+
+  MiRtBlock* block = mi_rt_block_create(vm->rt);
+  if (!block)
+  {
+    return mi_rt_make_void();
+  }
+  block->env = env;
+
+  MiRtValue block_v = mi_rt_make_block(block);
+
+  /* Register module contents into this namespace block. */
+  char mod_cstr[260];
+  if (mod_name.length >= sizeof(mod_cstr))
+  {
+    return mi_rt_make_void();
+  }
+  memcpy(mod_cstr, mod_name.ptr, mod_name.length);
+  mod_cstr[mod_name.length] = '\0';
+
+  bool ok = dll->module_register(vm, mod_cstr, block_v);
+  if (!ok)
+  {
+    mi_error_fmt("include: native module register failed: %.*s (%s)\n", (int)mod_name.length, (const char*)mod_name.ptr, dll_path.buf);
+    return mi_rt_make_void();
+  }
+
+  s_vm_module_cache_set(vm, key, block_v);
+  return block_v;
+}
+
 static MiRtValue s_vm_cmd_include(MiVm* vm, void* user, int argc, const MiRtValue* argv)
 {
   (void)user;
@@ -2055,6 +2363,54 @@ static MiRtValue s_vm_cmd_include(MiVm* vm, void* user, int argc, const MiRtValu
     }
   }
 
+
+  /* Fallback search: MI_ROOT/modules for .mi/.mx scripts. */
+  if (!x_fs_path_exists(&src_mx) && !x_fs_path_exists(&src_mi))
+  {
+    XFSPath modules_dir;
+    if (s_vm_get_modules_dir(vm, &modules_dir))
+    {
+      XFSPath mod_req = modules_dir;
+      x_fs_path_join_slice(&mod_req, &module);
+      (void)x_fs_path_normalize(&mod_req);
+
+      XFSPath mod_mx = mod_req;
+      XFSPath mod_mi = mod_req;
+      XSlice ext = x_fs_path_extension(mod_req.buf);
+      if (ext.length)
+      {
+        if (x_slice_eq_cstr(ext, ".mx"))
+        {
+          mod_mx = mod_req;
+          mod_mi = mod_req;
+          (void)x_fs_path_change_extension(&mod_mi, ".mi");
+        }
+        else if (x_slice_eq_cstr(ext, ".mi"))
+        {
+          mod_mi = mod_req;
+          mod_mx = mod_req;
+          (void)x_fs_path_change_extension(&mod_mx, ".mx");
+        }
+        else
+        {
+          mod_mi = mod_req;
+          mod_mx = mod_req;
+          (void)x_fs_path_change_extension(&mod_mi, ".mi");
+          (void)x_fs_path_change_extension(&mod_mx, ".mx");
+        }
+      }
+      else
+      {
+        (void)x_fs_path_change_extension(&mod_mi, ".mi");
+        (void)x_fs_path_change_extension(&mod_mx, ".mx");
+      }
+
+      src_mx = mod_mx;
+      src_mi = mod_mi;
+      req = mod_req;
+    }
+  }
+
   XFSPath load_mx;
   bool need_compile = false;
 
@@ -2066,6 +2422,12 @@ static MiRtValue s_vm_cmd_include(MiVm* vm, void* user, int argc, const MiRtValu
   {
     if (!x_fs_path_exists(&src_mi))
     {
+      MiRtValue native_v = s_vm_load_native_module(vm, module);
+      if (native_v.kind != MI_RT_VAL_VOID)
+      {
+        return native_v;
+      }
+
       mi_error_fmt("include: module not found: %.*s\n", (int)module.length, (const char*)module.ptr);
       return mi_rt_make_void();
     }
@@ -2189,10 +2551,30 @@ void mi_vm_set_cache_dir(MiVm* vm, const char* path)
   }
 }
 
+
+void mi_vm_set_modules_dir(MiVm* vm, const char* path)
+{
+  if (!vm)
+  {
+    return;
+  }
+
+  vm->modules_dir_set = false;
+  (void)x_fs_path_set(&vm->modules_dir, "");
+
+  if (path && path[0])
+  {
+    (void)x_fs_path_set(&vm->modules_dir, path);
+    (void)x_fs_path_normalize(&vm->modules_dir);
+    vm->modules_dir_set = true;
+  }
+}
+
 void mi_vm_init(MiVm* vm, MiRuntime* rt)
 {
   memset(vm, 0, sizeof(*vm));
   vm->rt = rt;
+  vm->api = &s_vm_api;
 
   vm->perm_arena = x_arena_create(1024 * 64);
   if (!vm->perm_arena)
@@ -2222,7 +2604,7 @@ void mi_vm_init(MiVm* vm, MiRuntime* rt)
   }
   vm->arg_frame_depth = 0;
 
-  // Minimal builtins to get started.
+  // Minimal builtins.
   // All native functions declare a type signature. The only intentional
   // outlier is print(), which is variadic.
   static MiFuncTypeSig s_sig_print = {0};
@@ -2331,28 +2713,32 @@ void mi_vm_init(MiVm* vm, MiRuntime* rt)
   s_sig_cmd.is_variadic = true;
   s_sig_cmd.variadic_type = MI_TYPE_ANY;
 
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("print"),   &s_sig_print,   s_vm_cmd_print,   NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("warning"), &s_sig_msg,     s_vm_cmd_warning, NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("error"),   &s_sig_msg,     s_vm_cmd_error,   NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("fatal"),   &s_sig_msg,     s_vm_cmd_fatal,   NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("assert"),  &s_sig_assert,  s_vm_cmd_assert,  NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("type"),    &s_sig_type,    s_vm_cmd_type,    NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("t"),       &s_sig_type,    s_vm_cmd_type,    NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("typeof"),  &s_sig_typeof,  s_vm_cmd_typeof,  NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("set"),     &s_sig_set,     s_vm_cmd_set,     NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("call"),    &s_sig_call,    s_vm_cmd_call,    NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("list"),    &s_sig_list,    s_vm_cmd_list,    NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("dict"),    &s_sig_dict,    s_vm_cmd_dict,    NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("len"),     &s_sig_len,     s_vm_cmd_len,     NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("cmd"),     &s_sig_cmd,     s_vm_cmd_cmd,     NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("include"), &s_sig_include, s_vm_cmd_include, NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("import"),  &s_sig_include, s_vm_cmd_include, NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("trace"),   &s_sig_trace,   s_vm_cmd_trace,   NULL, x_slice_init(NULL, 0));
 
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("argc"),     &s_sig_argc,     s_vm_cmd_argc,     NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("arg"),      &s_sig_arg,      s_vm_cmd_arg,      NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("arg_type"), &s_sig_arg_type, s_vm_cmd_arg_type, NULL, x_slice_init(NULL, 0));
-  (void)mi_vm_register_native(vm, x_slice_from_cstr("arg_name"), &s_sig_arg_name, s_vm_cmd_arg_name, NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("arg"),       &s_sig_arg,       s_vm_cmd_arg,       NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("arg_name"),  &s_sig_arg_name,  s_vm_cmd_arg_name,  NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("arg_type"),  &s_sig_arg_type,  s_vm_cmd_arg_type,  NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("argc"),      &s_sig_argc,      s_vm_cmd_argc,      NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("assert"),    &s_sig_assert,    s_vm_cmd_assert,    NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("call"),      &s_sig_call,      s_vm_cmd_call,      NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("cmd"),       &s_sig_cmd,       s_vm_cmd_cmd,       NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("dict"),      &s_sig_dict,      s_vm_cmd_dict,      NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("error"),     &s_sig_msg,       s_vm_cmd_error,     NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("fatal"),     &s_sig_msg,       s_vm_cmd_fatal,     NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("import"),    &s_sig_include,   s_vm_cmd_include,   NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("include"),   &s_sig_include,   s_vm_cmd_include,   NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("len"),       &s_sig_len,       s_vm_cmd_len,       NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("list"),      &s_sig_list,      s_vm_cmd_list,      NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("print"),     &s_sig_print,     s_vm_cmd_print,     NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("set"),       &s_sig_set,       s_vm_cmd_set,       NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("t"),         &s_sig_type,      s_vm_cmd_type,      NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("trace"),     &s_sig_trace,     s_vm_cmd_trace,     NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("type"),      &s_sig_type,      s_vm_cmd_type,      NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("typeof"),    &s_sig_typeof,    s_vm_cmd_typeof,    NULL, x_slice_init(NULL, 0));
+  (void)mi_vm_register_native(vm, x_slice_from_cstr("warning"),   &s_sig_msg,       s_vm_cmd_warning,   NULL, x_slice_init(NULL, 0));
+
+  /* Standard library */
+  //mi_lib_int_register(vm);
+  //mi_lib_float_register(vm);
 }
 
 void mi_vm_shutdown(MiVm* vm)
@@ -2410,6 +2796,10 @@ void mi_vm_shutdown(MiVm* vm)
   {
     for (size_t i = 0; i < vm->module_cache_count; ++i)
     {
+      if (vm->rt)
+      {
+        mi_rt_value_release(vm->rt, vm->module_cache[i].value);
+      }
       vm->module_cache[i].key = NULL;
       vm->module_cache[i].value = mi_rt_make_void();
     }
@@ -2417,6 +2807,31 @@ void mi_vm_shutdown(MiVm* vm)
   }
   vm->module_cache = NULL;
   vm->module_cache_count = 0u;
+
+  if (vm->native_dlls)
+  {
+    for (size_t i = 0; i < vm->native_dll_count; ++i)
+    {
+      if (vm->native_dlls[i].handle)
+      {
+#ifdef _WIN32
+        FreeLibrary((HMODULE)vm->native_dlls[i].handle);
+#else
+        dlclose(vm->native_dlls[i].handle);
+#endif
+      }
+      vm->native_dlls[i].path = NULL;
+      vm->native_dlls[i].handle = NULL;
+      vm->native_dlls[i].module_count = NULL;
+      vm->native_dlls[i].module_name = NULL;
+      vm->native_dlls[i].module_register = NULL;
+    }
+    free(vm->native_dlls);
+  }
+  vm->native_dlls = NULL;
+  vm->native_dll_count = 0u;
+  vm->native_dll_capacity = 0u;
+
   vm->module_cache_capacity = 0u;
 
   if (vm->perm_arena)
@@ -2424,47 +2839,6 @@ void mi_vm_shutdown(MiVm* vm)
     x_arena_destroy(vm->perm_arena);
     vm->perm_arena = NULL;
   }
-}
-
-bool mi_vm_register_command(MiVm* vm, XSlice name, MiVmCommandFn fn)
-{
-  if (!vm || !fn)
-  {
-    return false;
-  }
-
-  MiRtCmd* c = mi_rt_cmd_create_native(vm->rt, (MiRtNativeFn)fn);
-  if (!c)
-  {
-    return false;
-  }
-  MiRtValue v = mi_rt_make_cmd(c);
-
-  for (size_t i = 0; i < vm->command_count; ++i)
-  {
-    if (s_slice_eq(vm->commands[i].name, name))
-    {
-      mi_rt_value_release(vm->rt, vm->commands[i].value);
-      vm->commands[i].value = v;
-      mi_rt_value_retain(vm->rt, v);
-      (void)mi_rt_var_set(vm->rt, name, v);
-      return true;
-    }
-  }
-
-  if (vm->command_count == vm->command_capacity)
-  {
-    size_t new_cap = vm->command_capacity ? vm->command_capacity * 2u : 32u;
-    vm->commands = (MiVmCommandEntry*) s_realloc(vm->commands, new_cap * sizeof(*vm->commands));
-    vm->command_capacity = new_cap;
-  }
-
-  vm->commands[vm->command_count].name = name;
-  vm->commands[vm->command_count].value = v;
-  mi_rt_value_retain(vm->rt, v);
-  vm->command_count++;
-  (void)mi_rt_var_define(vm->rt, name, v);
-  return true;
 }
 
 static XSlice s_vm_perm_copy_slice(MiVm* vm, XSlice s)
@@ -2573,6 +2947,251 @@ bool mi_vm_register_native(MiVm* vm, XSlice name, const MiFuncTypeSig* sig, MiVm
   return true;
 }
 
+static void s_vm_track_detached_env(MiVm* vm, MiScopeFrame* env)
+{
+  if (!vm || !env)
+  {
+    return;
+  }
+
+  if (vm->module_env_count == vm->module_env_capacity)
+  {
+    size_t new_cap = vm->module_env_capacity ? vm->module_env_capacity * 2u : 8u;
+    vm->module_envs = (MiScopeFrame**)s_realloc(vm->module_envs, new_cap * sizeof(*vm->module_envs));
+    vm->module_env_capacity = new_cap;
+  }
+  vm->module_envs[vm->module_env_count++] = env;
+}
+
+MiRtValue mi_vm_namespace_get_or_create(MiVm* vm, XSlice name)
+{
+  if (!vm || !vm->rt || !name.ptr || name.length == 0)
+  {
+    return mi_rt_make_void();
+  }
+
+  MiRtValue existing = mi_rt_make_void();
+  if (mi_rt_var_get(vm->rt, name, &existing))
+  {
+    if (existing.kind == MI_RT_VAL_BLOCK && existing.as.block && existing.as.block->env)
+    {
+      return existing;
+    }
+  }
+
+  MiScopeFrame* env = mi_rt_scope_create_detached(vm->rt, NULL);
+  if (!env)
+  {
+    return mi_rt_make_void();
+  }
+  s_vm_track_detached_env(vm, env);
+
+  MiRtBlock* b = mi_rt_block_create(vm->rt);
+  b->kind = MI_RT_BLOCK_VM_CHUNK;
+  b->ptr = NULL;
+  b->env = env;
+
+  MiRtValue block_v = mi_rt_make_block(b);
+  (void)mi_rt_var_define(vm->rt, name, block_v);
+  return block_v;
+}
+
+bool mi_vm_namespace_add_native(MiVm* vm, MiRtValue ns_block, XSlice member_name, const MiFuncTypeSig* sig, MiVmNativeFn fn, void* user, XSlice doc)
+{
+  if (!vm || !vm->rt || !sig || !fn)
+  {
+    return false;
+  }
+  if (ns_block.kind != MI_RT_VAL_BLOCK || !ns_block.as.block || !ns_block.as.block->env)
+  {
+    return false;
+  }
+  if (!member_name.ptr || member_name.length == 0)
+  {
+    return false;
+  }
+
+  const MiFuncTypeSig* sig_copy = s_vm_perm_copy_sig(vm, sig);
+  if (!sig_copy)
+  {
+    return false;
+  }
+
+  XSlice doc_copy = s_vm_perm_copy_slice(vm, doc);
+
+  MiRtCmd* c = mi_rt_cmd_create_native2(vm->rt, (MiRtNativeFn2)fn, user, sig_copy, doc_copy);
+  if (!c)
+  {
+    return false;
+  }
+
+  MiRtValue v = mi_rt_make_cmd(c);
+  uint32_t sym_id = mi_rt_sym_intern(vm->rt, member_name);
+  mi_rt_var_set_from_id(ns_block.as.block->env, sym_id, v);
+  return true;
+}
+
+static bool s_vm_build_sig_from_varargs(MiFuncTypeSig* out_sig, MiTypeKind ret_type, int param_count, bool is_variadic, MiTypeKind variadic_type, va_list args)
+{
+  if (!out_sig)
+  {
+    return false;
+  }
+
+  if (param_count < 0)
+  {
+    return false;
+  }
+
+  MiTypeKind* params = NULL;
+  if (param_count > 0)
+  {
+    params = (MiTypeKind*)malloc(sizeof(MiTypeKind) * (size_t)param_count);
+    if (!params)
+    {
+      return false;
+    }
+
+    for (int i = 0; i < param_count; ++i)
+    {
+      /* MiTypeKind is an enum; promoted to int in varargs. */
+      params[i] = (MiTypeKind)va_arg(args, int);
+    }
+  }
+
+  *out_sig = (MiFuncTypeSig){0};
+  out_sig->ret_type = ret_type;
+  out_sig->param_types = params;
+  out_sig->param_count = (uint16_t)param_count;
+  out_sig->is_variadic = is_variadic;
+  out_sig->variadic_type = variadic_type;
+
+  return true;
+}
+
+bool mi_vm_register_native_sigv(MiVm* vm, const char* name_cstr, MiVmNativeFn fn, void* user, XSlice doc, MiTypeKind ret_type, int param_count, ...)
+{
+  va_list args;
+  va_start(args, param_count);
+
+  MiFuncTypeSig sig = {0};
+  bool ok = s_vm_build_sig_from_varargs(&sig, ret_type, param_count, false, (MiTypeKind)0, args);
+
+  va_end(args);
+
+  if (!ok)
+  {
+    return false;
+  }
+
+  bool r = mi_vm_register_native(vm, x_slice_from_cstr(name_cstr), &sig, fn, user, doc);
+
+  if (sig.param_types)
+  {
+    free((void*)sig.param_types);
+  }
+
+  return r;
+}
+
+bool mi_vm_register_native_sigv_var(MiVm* vm, const char* name_cstr, MiVmNativeFn fn, void* user, XSlice doc, MiTypeKind ret_type, int fixed_param_count, MiTypeKind variadic_type, ...)
+{
+  va_list args;
+  va_start(args, variadic_type);
+
+  MiFuncTypeSig sig = {0};
+  bool ok = s_vm_build_sig_from_varargs(&sig, ret_type, fixed_param_count, true, variadic_type, args);
+
+  va_end(args);
+
+  if (!ok)
+  {
+    return false;
+  }
+
+  bool r = mi_vm_register_native(vm, x_slice_from_cstr(name_cstr), &sig, fn, user, doc);
+
+  if (sig.param_types)
+  {
+    free((void*)sig.param_types);
+  }
+
+  return r;
+}
+
+bool mi_vm_namespace_add_native_sigv(MiVm* vm, MiRtValue ns_block, const char* member_name_cstr, MiVmNativeFn fn, void* user, XSlice doc, MiTypeKind ret_type, int param_count, ...)
+{
+  va_list args;
+  va_start(args, param_count);
+
+  MiFuncTypeSig sig = {0};
+  bool ok = s_vm_build_sig_from_varargs(&sig, ret_type, param_count, false, (MiTypeKind)0, args);
+
+  va_end(args);
+
+  if (!ok)
+  {
+    return false;
+  }
+
+  bool r = mi_vm_namespace_add_native(vm, ns_block, x_slice_from_cstr(member_name_cstr), &sig, fn, user, doc);
+
+  if (sig.param_types)
+  {
+    free((void*)sig.param_types);
+  }
+
+  return r;
+}
+
+bool mi_vm_namespace_add_native_sigv_var(MiVm* vm, MiRtValue ns_block, const char* member_name_cstr, MiVmNativeFn fn, void* user, XSlice doc, MiTypeKind ret_type, int fixed_param_count, MiTypeKind variadic_type, ...)
+{
+  va_list args;
+  va_start(args, variadic_type);
+
+  MiFuncTypeSig sig = {0};
+  bool ok = s_vm_build_sig_from_varargs(&sig, ret_type, fixed_param_count, true, variadic_type, args);
+
+  va_end(args);
+
+  if (!ok)
+  {
+    return false;
+  }
+
+  bool r = mi_vm_namespace_add_native(vm, ns_block, x_slice_from_cstr(member_name_cstr), &sig, fn, user, doc);
+
+  if (sig.param_types)
+  {
+    free((void*)sig.param_types);
+  }
+
+  return r;
+}
+
+bool mi_vm_namespace_add_value(MiVm* vm, MiRtValue ns_block, const char* member_name_cstr, MiRtValue value)
+{
+  if (!vm || !vm->rt)
+  {
+    return false;
+  }
+
+  if (ns_block.kind != MI_RT_VAL_BLOCK || !ns_block.as.block || !ns_block.as.block->env)
+  {
+    return false;
+  }
+
+  XSlice member_name = x_slice_from_cstr(member_name_cstr);
+  if (!member_name.ptr || member_name.length == 0)
+  {
+    return false;
+  }
+
+  uint32_t sym_id = mi_rt_sym_intern(vm->rt, member_name);
+  mi_rt_var_set_from_id(ns_block.as.block->env, sym_id, value);
+  return true;
+}
+
 bool mi_vm_find_command(MiVm* vm, XSlice name, MiRtValue* out_cmd)
 {
   if (!vm)
@@ -2614,6 +3233,177 @@ MiVmCommandFn mi_vm_find_command_fn(MiVm* vm, XSlice name)
   return out;
 }
 
+bool mi_vm_find_sig(MiVm* vm, XSlice qualified_name, const MiFuncTypeSig** out_sig)
+{
+  if (!vm || !vm->rt || !qualified_name.ptr || qualified_name.length == 0)
+  {
+    return false;
+  }
+
+  if (out_sig)
+  {
+    *out_sig = NULL;
+  }
+
+  /* Fast path: global command registry. */
+  {
+    MiRtValue v = mi_rt_make_void();
+    if (mi_vm_find_command(vm, qualified_name, &v))
+    {
+      /* Treat result as borrowed: retain before releasing. */
+      mi_rt_value_retain(vm->rt, v);
+
+      bool ok = (v.kind == MI_RT_VAL_CMD && v.as.cmd && v.as.cmd->sig);
+      if (ok && out_sig)
+      {
+        *out_sig = v.as.cmd->sig;
+      }
+
+      mi_rt_value_release(vm->rt, v);
+      return ok;
+    }
+  }
+
+  /* If the name is not qualified, try global variables (namespaces may live here). */
+  {
+    const uint8_t* p = (const uint8_t*)qualified_name.ptr;
+    const uint8_t* end = p + qualified_name.length;
+    bool has_qual = false;
+    for (const uint8_t* it = p; it + 1 < end; ++it)
+    {
+      if (it[0] == ':' && it[1] == ':')
+      {
+        has_qual = true;
+        break;
+      }
+    }
+
+    if (!has_qual)
+    {
+      MiRtValue v = mi_rt_make_void();
+      if (mi_rt_var_get(vm->rt, qualified_name, &v))
+      {
+        /* Borrowed -> retain before release. */
+        mi_rt_value_retain(vm->rt, v);
+
+        bool ok = (v.kind == MI_RT_VAL_CMD && v.as.cmd && v.as.cmd->sig);
+        if (ok && out_sig)
+        {
+          *out_sig = v.as.cmd->sig;
+        }
+
+        mi_rt_value_release(vm->rt, v);
+        return ok;
+      }
+      return false;
+    }
+  }
+
+  /* Qualified lookup: a::b::c walks envs and ends in a cmd with a signature. */
+  {
+    const char* p = (const char*)qualified_name.ptr;
+    const char* end = p + qualified_name.length;
+
+    const char* seg = p;
+    const char* q = p;
+    while (q + 1 < end)
+    {
+      if (q[0] == ':' && q[1] == ':')
+      {
+        break;
+      }
+      q++;
+    }
+
+    if (q + 1 >= end)
+    {
+      return false;
+    }
+
+    XSlice first = x_slice_init(seg, (int)(q - seg));
+
+    MiRtValue cur = mi_rt_make_void();
+    if (!mi_rt_var_get(vm->rt, first, &cur))
+    {
+      return false;
+    }
+    /* Borrowed -> retain so we can safely release as we walk. */
+    mi_rt_value_retain(vm->rt, cur);
+
+    q += 2;
+    while (q <= end)
+    {
+      const char* next = q;
+      while (next + 1 < end)
+      {
+        if (next[0] == ':' && next[1] == ':')
+        {
+          break;
+        }
+        next++;
+      }
+
+      bool is_last = (next + 1 >= end);
+      XSlice member = x_slice_init(q, (int)(is_last ? (end - q) : (next - q)));
+
+      if (cur.kind != MI_RT_VAL_BLOCK || !cur.as.block || !cur.as.block->env)
+      {
+        mi_rt_value_release(vm->rt, cur);
+        return false;
+      }
+
+      MiRtValue child = mi_rt_make_void();
+      if (!mi_rt_var_get_from(cur.as.block->env, member, &child))
+      {
+        mi_rt_value_release(vm->rt, cur);
+        return false;
+      }
+      // Borrowed -> retain before we drop 'cur'. 
+      mi_rt_value_retain(vm->rt, child);
+
+      mi_rt_value_release(vm->rt, cur);
+      cur = child;
+
+      if (is_last)
+      {
+        bool ok = (cur.kind == MI_RT_VAL_CMD && cur.as.cmd && cur.as.cmd->sig);
+        if (ok && out_sig)
+        {
+          *out_sig = cur.as.cmd->sig;
+        }
+
+        mi_rt_value_release(vm->rt, cur);
+        return ok;
+      }
+
+      q = next + 2;
+    }
+
+    mi_rt_value_release(vm->rt, cur);
+  }
+
+  return false;
+}
+
+
+MiRtValue mi_vm_call_command(MiVm* vm, XSlice cmd_name, int argc, const MiRtValue* argv)
+{
+  if (!vm || !vm->rt || !cmd_name.ptr || cmd_name.length == 0)
+  {
+    return mi_rt_make_void();
+  }
+
+  MiRtValue cmd_value = mi_rt_make_void();
+  if (!mi_vm_find_command(vm, cmd_name, &cmd_value))
+  {
+    return mi_rt_make_void();
+  }
+
+  MiRtValue ret = s_vm_exec_cmd_value(vm, cmd_name, cmd_value, argc, argv);
+  mi_rt_value_release(vm->rt, cmd_value);
+  return ret;
+}
+
 
 
 //----------------------------------------------------------
@@ -2642,7 +3432,7 @@ static void s_vm_chunk_destroy_ex(MiVmChunk* chunk, MiVmChunk** stack, size_t de
   {
     if (stack[i] == chunk)
     {
-      /* Cycle detected; avoid infinite recursion. */
+      // Cycle detected; avoid infinite recursion. 
       return;
     }
   }
@@ -2843,7 +3633,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
   {
     MiVmIns ins = chunk->code[pc++];
 
-    /* Debug: remember current instruction location for trace:. */
+    // Debug: remember current instruction location for trace:. 
     vm->dbg_chunk = chunk;
     vm->dbg_ip = (pc == 0) ? 0 : (pc - 1);
     switch ((MiVmOp) ins.op)
@@ -3436,7 +4226,7 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
 
           bool is_qualified = s_slice_has_double_colon(cmd_name);
 
-          /* Scoped commands: a local var may shadow a builtin (unqualified only). */
+          // Scoped commands: a local var may shadow a builtin (unqualified only). 
           if (!is_qualified)
           {
             MiRtValue scoped = mi_rt_make_void();
@@ -3459,8 +4249,8 @@ MiRtValue mi_vm_execute(MiVm* vm, const MiVmChunk* chunk)
           }
           if (!target && is_qualified)
           {
-            /* Resolve qualified name lazily and cache it.
-               This avoids per-call qualified lookup; only the first call resolves. */
+            // Resolve qualified name lazily and cache it.
+            // This avoids per-call qualified lookup; only the first call resolves.
             MiRtCmd* q = NULL;
             if (s_vm_resolve_qualified_cmd(vm, cmd_name, &q) && q)
             {
@@ -3814,8 +4604,8 @@ static void s_vm_disasm_ex(const MiVmChunk* chunk, const MiVmChunk** stack, size
     return;
   }
 
-  /* Cycle/alias guard: chunks can be shared, and bugs can create cycles.
-     Disassembler must not recurse forever. */
+  // Cycle/alias guard: chunks can be shared, and bugs can create cycles.
+  // Disassembler must not recurse forever.
   for (size_t i = 0; i < depth; ++i)
   {
     if (stack[i] == chunk)
@@ -3828,7 +4618,7 @@ static void s_vm_disasm_ex(const MiVmChunk* chunk, const MiVmChunk** stack, size
   const MiVmChunk* local_stack[128];
   if (depth < (sizeof(local_stack) / sizeof(local_stack[0])))
   {
-    /* Copy the incoming stack so the function can be called with NULL. */
+    // Copy the incoming stack so the function can be called with NULL. 
     for (size_t i = 0; i < depth; ++i)
     {
       local_stack[i] = stack[i];
@@ -3902,7 +4692,7 @@ static void s_vm_disasm_ex(const MiVmChunk* chunk, const MiVmChunk** stack, size
 
     size_t pc = i * sizeof(MiVmIns);
 
-    /* Print prefix: pc + raw bytes */
+    // Print prefix: pc + raw bytes 
     printf("0x%08zx  %02X %02X %02X %02X %02X %02X %02X %02X   ",
         pc,
         (unsigned)bytes[0],
@@ -3914,8 +4704,8 @@ static void s_vm_disasm_ex(const MiVmChunk* chunk, const MiVmChunk** stack, size
         (unsigned)bytes[6],
         (unsigned)bytes[7]);
 
-    /* Build the instruction text (no comment) and an optional comment,
-       then print them with a fixed comment column. */
+    // Build the instruction text (no comment) and an optional comment,
+    // then print them with a fixed comment column.
     char instr[160];
     char comment[160];
     instr[0] = '\0';
@@ -4084,7 +4874,7 @@ static void s_vm_disasm_ex(const MiVmChunk* chunk, const MiVmChunk** stack, size
 
       case MI_VM_OP_ARG_PUSH_CONST:
         {
-          /* IMPORTANT: keep previous behavior: print inline value, comment is const_N */
+          // IMPORTANT: keep previous behavior: print inline value, comment is const_N 
           char vbuf[96];
           vbuf[0] = '\0';
 
@@ -4232,7 +5022,7 @@ static void s_vm_disasm_ex(const MiVmChunk* chunk, const MiVmChunk** stack, size
         break;
     }
 
-    /* Special-case: ARG_PUSH_CONST must print value inline, not an index. */
+    // Special-case: ARG_PUSH_CONST must print value inline, not an index. 
     if (op == MI_VM_OP_ARG_PUSH_CONST)
     {
       if (ins.imm >= 0 && (size_t)ins.imm < chunk->const_count)
@@ -4250,7 +5040,7 @@ static void s_vm_disasm_ex(const MiVmChunk* chunk, const MiVmChunk** stack, size
       }
     }
 
-    /* Print with fixed comment column */
+    // Print with fixed comment column 
     printf("%-32s", instr);
     if (comment[0] || op == MI_VM_OP_HALT)
     {
